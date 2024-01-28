@@ -1,0 +1,31 @@
+{
+  "name": "vartalaap-server",
+  "version": "1.0.0",
+  "description": "Vartalaap is a multi-user video chatting app like Google Meet, this repository serves as server part of Vartalaap",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "prebuild": "rm -rf dist/",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "nodemon"
+  },
+  "author": "Vaishnav Ghenge",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.8",
+    "@types/uuid": "^9.0.8",
+    "@types/ws": "^8.5.10",
+    "nodemon": "^3.0.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "prisma": "^5.8.1",
+    "uuid": "^9.0.1",
+    "winston": "^3.11.0",
+    "ws": "^8.16.0"
+  }
+}
