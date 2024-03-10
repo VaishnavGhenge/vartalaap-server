@@ -1,14 +1,17 @@
 import express from "express";
 import http from "http";
-import { Server as WebSocketServer } from "ws";
+import { Server as WebSocketServer, WebSocket } from "ws";
 import logger from "./Logger/logger";
 import expressWinston from "express-winston";
-import { startWebSockerServer } from "./websockets/socketServer";
+import { startWebSocketServer } from "./websocket/server";
+import { startRestServer } from "./rest/server";
 
-function startServer() {
+function startBackend() {
     const app = express();
     const server = http.createServer(app);
     const wss = new WebSocketServer({ server });
+
+    const sessionMap = new Map<string, WebSocket | null>();
 
     // Apply the CORS middleware
     app.use(function (req, res, next) {
@@ -35,7 +38,8 @@ function startServer() {
         logger.info(`Server running on port ${PORT}`);
     });
 
-    startWebSockerServer(wss);
+    startRestServer(app, sessionMap);
+    startWebSocketServer(wss);
 }
 
-startServer();
+startBackend();
