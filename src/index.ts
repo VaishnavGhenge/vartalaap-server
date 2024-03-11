@@ -5,6 +5,7 @@ import logger from "./Logger/logger";
 import expressWinston from "express-winston";
 import { startWebSocketServer } from "./websocket/server";
 import { startRestServer } from "./rest/server";
+import cors from "cors";
 
 function startBackend() {
     const app = express();
@@ -12,12 +13,14 @@ function startBackend() {
     const wss = new WebSocketServer({ server });
 
     // Apply the CORS middleware
-    app.use(function (req, res, next) {
-        res.header("Access-Control-Allow-Origin", "https://vartalaap-client.vercel.app");
-        res.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE");
-        res.header("Access-Control-Allow-Headers", "Content-Type");
-        next();
-    });
+    // Configure CORS to allow only specific origins
+    const corsOptions = {
+        origin: ['https://vartalaap-client1.vercel.app', 'https://vartalaap-client2.vercel.app'],
+        methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+        optionsSuccessStatus: 204,
+    };
+
+    app.use(cors(corsOptions));
 
     // Log requests and responses using Express-Winston middleware
     app.use(expressWinston.logger({
