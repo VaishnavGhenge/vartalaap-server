@@ -11,8 +11,6 @@ function startBackend() {
     const server = http.createServer(app);
     const wss = new WebSocketServer({ server });
 
-    const sessionMap = new Map<string, WebSocket | null>();
-
     // Apply the CORS middleware
     app.use(function (req, res, next) {
         res.header("Access-Control-Allow-Origin", "*");
@@ -38,7 +36,7 @@ function startBackend() {
         logger.info(`Server running on port ${PORT}`);
     });
 
-    startRestServer(app, sessionMap);
+    startRestServer(app);
     startWebSocketServer(wss);
 }
 

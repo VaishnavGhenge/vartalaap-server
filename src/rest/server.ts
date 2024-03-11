@@ -2,21 +2,20 @@ import { Request, Response, NextFunction, Express } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { WebSocket } from "ws";
 import { IRawRequest, IRequest } from "../types/httpTypes";
-import { meets } from "../websocket/server";
+import { meets, sessionIdToSocketMap } from "../websocket/server";
 import { joinMeetQueryParamsSchema } from "../types/zod";
 
 export function startRestServer(
     app: Express,
-    sessionMap: Map<string, WebSocket | null>,
 ) {
     // Insert sessionId if user request lacks it (means new user)
     app.use((req: IRawRequest, res: Response, next: NextFunction) => {
         if(!req.params.sessionId) {
             const newSessionId = uuidv4();
-            sessionMap.set(newSessionId, null);
+            sessionIdToSocketMap.set(newSessionId, null);
 
             req.sessionId = newSessionId;
-        } else if(!sessionMap.has(req.params.sessionId)) {
+        } else if(!sessionIdToSocketMap.has(req.params.sessionId)) {
             return res.status(400).json({message: "Invalid session Id"});
         }
 

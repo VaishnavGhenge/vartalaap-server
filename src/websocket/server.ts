@@ -3,11 +3,10 @@ import logger from "../Logger/logger";
 import { IMessageData } from "../types/webcocketTypes";
 import { MeetEvent } from "./config";
 import { sendToPeer } from "./utils";
-import { joinMeet, joinMeetLobby } from "./meets";
+import { answer, createOffer, joinMeet, joinMeetLobby, leaveMeeting } from "./meets";
 
 export const meets = new Map<string, { peersInLobby: Set<string>, peersInMeet: Set<string> }>();
-export const meetIdToSessionIdMap = new Map<string, string>();
-export const sessionIdToSocketMap = new Map<string, WebSocket>();
+export const sessionIdToSocketMap = new Map<string, WebSocket | null>();
 
 export function startWebSocketServer(wss: WebSocketServer) {
     wss.on("connection", (ws: WebSocket) => {
@@ -41,6 +40,18 @@ export function startWebSocketServer(wss: WebSocketServer) {
                 case MeetEvent.JOIN_MEET:
                     logger.info("Join meet");
                     joinMeet(data.meetId, ws, sessionId);
+
+                    break;
+                case MeetEvent.CREATE_OFFER:
+                    createOffer(data.meetId, ws, sessionId, data.offer);
+
+                    break;
+                case MeetEvent.CREATE_ANSWER:
+                    answer(data.meetId, ws, sessionId, data.answer);
+
+                    break;
+                case MeetEvent.LEAVE_MEET:
+                    leaveMeeting(data.meetId, ws, sessionId);
 
                     break;
                 default:

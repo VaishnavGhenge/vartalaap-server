@@ -1,6 +1,7 @@
 import { WebSocket } from "ws";
 import { meets, sessionIdToSocketMap } from "./server";
 import { MeetEvent } from "./config";
+import logger from "../Logger/logger";
 
 export function sendToMeetPeers(meetId: string, message: any, ws: WebSocket, exemptCurrentPeer = false) {
     try {
@@ -8,11 +9,9 @@ export function sendToMeetPeers(meetId: string, message: any, ws: WebSocket, exe
         const meetPeers = getMeetPeers(meetId);
         const meetPeerList = [...meetPeers.peersInMeet, ...meetPeers.peersInLobby];
 
-        console.log(meetPeerList);
+        console.log("meet list: ", meetPeerList);
 
         const meetPeerSocketList = meetPeerList.map((peerSessionId) => sessionIdToSocketMap.get(peerSessionId));
-
-        console.log(meetPeerSocketList);
 
         meetPeerSocketList.forEach((client) => {
             if(!client) {
@@ -20,12 +19,12 @@ export function sendToMeetPeers(meetId: string, message: any, ws: WebSocket, exe
             }
 
             if(client.readyState === WebSocket.OPEN) {
-                if(ws !== client && exemptCurrentPeer) {
+                if(ws === client && exemptCurrentPeer) {
                     client.send(strigifiedMessage);
                     return;
+                } else {
+                    client.send(strigifiedMessage);
                 }
-
-                client.send(strigifiedMessage);
             }
         });
     }
@@ -61,4 +60,20 @@ export function getMeetPeers(meetId: string): {peersInLobby: Set<string>, peersI
     }
 
     return meetPeers;
+}
+
+export function initiateMeet(meetId: string, peerSessionsInMeet: Set<string>) {
+    if(peerSessionsInMeet.size === 2) {
+        logger.warn("initiated meet");
+
+        const firstPeerSessionId = Array.from(peerSessionsInMeet)[0];
+        const client: WebSocket | null = sessionIdToSocketMap.get(firstPeerSessionId) || null;
+
+        if(!client) {
+            logger.error(`Logical Error: Did not found websocket of meet connected peer`);
+            return;
+        }
+
+        sendToPeer(client, {type: MeetEvent.INITIATE_MEET_REQUEST});
+    }
 }
