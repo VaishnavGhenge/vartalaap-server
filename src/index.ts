@@ -15,7 +15,7 @@ function startBackend() {
     // Apply the CORS middleware
     // Configure CORS to allow only specific origins
     const corsOptions = {
-        origin: ['https://vartalaap-client.vercel.app/', 'http://localhost:3000'],
+        origin: ['https://vartalaap-client.vercel.app', 'http://localhost:3000'],
         methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
         optionsSuccessStatus: 204,
     };
