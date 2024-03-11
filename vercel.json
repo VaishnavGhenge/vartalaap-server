@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "src/**/*.ts",
+      "use": "@now/node@latest",
+      "config": { "zeroConfig": true }
+    }
+  ],
+  "routes": [
+    { "src": "/(.*)", "dest": "/src/$1" }
+  ],
+  "env": {
+    "NODE_ENV": "production"
+  }
+}
