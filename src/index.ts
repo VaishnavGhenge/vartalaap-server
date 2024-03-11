@@ -17,7 +17,7 @@ function startBackend() {
     const corsOptions = {
         origin: ['https://vartalaap-client.vercel.app', 'http://localhost:3000'],
         methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
-        optionsSuccessStatus: 204,
+        optionsSuccessStatus: 200,
     };
 
     app.use(cors(corsOptions));
