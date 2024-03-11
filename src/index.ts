@@ -13,14 +13,7 @@ function startBackend() {
     const wss = new WebSocketServer({ server });
 
     // Apply the CORS middleware
-    // Configure CORS to allow only specific origins
-    const corsOptions = {
-        origin: ['https://vartalaap-client.vercel.app', 'http://localhost:3000'],
-        methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
-        optionsSuccessStatus: 200,
-    };
-
-    app.use(cors(corsOptions));
+    app.use(cors());
 
     // Log requests and responses using Express-Winston middleware
     app.use(expressWinston.logger({
