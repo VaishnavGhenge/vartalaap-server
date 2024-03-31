@@ -12,6 +12,12 @@ function startBackend() {
     const server = http.createServer(app);
     const wss = new WebSocketServer({ server });
 
+    // Parse JSON bodies
+    app.use(express.json());
+
+    // Parse URL-encoded bodies
+    app.use(express.urlencoded({ extended: true }));
+
     // Apply the CORS middleware
     app.use(cors());
 
