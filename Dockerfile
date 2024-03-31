@@ -1,6 +1,9 @@
 # Use the official lightweight Node.js 18 image.
 # https://hub.docker.com/_/node
-FROM node:18-slim
+FROM node:18
+
+# Install OpenSSL
+RUN apt-get update -y && apt-get install -y openssl
 
 # Create and change to the app directory.
 WORKDIR /usr/src/app
@@ -11,7 +14,8 @@ WORKDIR /usr/src/app
 COPY package*.json ./
 
 # Install production dependencies.
-RUN npm install --only=production
+RUN npm install 
+#--only=production
 
 # Copy local code to the container image.
 COPY . .
