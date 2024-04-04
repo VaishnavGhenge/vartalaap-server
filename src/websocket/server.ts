@@ -2,11 +2,9 @@ import { WebSocket, Server as WebSocketServer } from "ws";
 import logger from "../Logger/logger";
 import { IMessageData } from "../types/webcocketTypes";
 import { MeetEvent } from "./config";
-import { sendToPeer } from "./utils";
+import { getMeetPeers, sendToMeetPeers, sendToPeer } from "./utils";
 import { answer, createOffer, joinMeet, joinMeetLobby, leaveMeeting } from "./meets";
-
-export const meets = new Map<string, { peersInLobby: Set<string>, peersInMeet: Set<string> }>();
-export const sessionIdToSocketMap = new Map<string, WebSocket | null>();
+import { sessionIdToMeetMap, sessionIdToSocketMap, socketToSessionMap } from "../index";
 
 export function startWebSocketServer(wss: WebSocketServer) {
     wss.on("connection", (ws: WebSocket) => {
@@ -29,7 +27,9 @@ export function startWebSocketServer(wss: WebSocketServer) {
 
             const sessionId = data.sessionId;
             logger.info(`Message from ${sessionId} message: ${data.type}`);
+
             sessionIdToSocketMap.set(sessionId, ws);
+            socketToSessionMap.set(ws, sessionId); // when user disconnects remove session.
 
             // Handle different types of messages
             switch (data.type) {
@@ -38,7 +38,6 @@ export function startWebSocketServer(wss: WebSocketServer) {
 
                     break;
                 case MeetEvent.JOIN_MEET:
-                    logger.info("Join meet");
                     joinMeet(data.meetId, ws, sessionId);
 
                     break;
@@ -60,10 +59,34 @@ export function startWebSocketServer(wss: WebSocketServer) {
         });
 
         ws.on("close", () => {
-            logger.warn(`User got disconnected`);
-
             // Remove the session from the sessions map when the WebSocket connection is closed
-            // sessions.delete(ws);
+            if(socketToSessionMap.has(ws)) {
+                const sessionId = socketToSessionMap.get(ws)!;
+
+                if(sessionIdToMeetMap.has(sessionId)) {
+                    const meetId = sessionIdToMeetMap.get(sessionId)!;
+
+                    const meetPeers = getMeetPeers(meetId);
+                    meetPeers.peersInLobby.delete(sessionId);
+                    meetPeers.peersInMeet.delete(sessionId);
+
+                    sessionIdToSocketMap.delete(sessionId);
+                    socketToSessionMap.delete(ws);
+
+                    socketToSessionMap.delete(ws);
+
+                    // Notify all connected peers, leaving of a current connection
+                    const leaveMessage = {
+                        type: MeetEvent.PEER_LEFT,
+                        sessionId: sessionId,
+                    };
+                    sendToMeetPeers(meetId, leaveMessage, ws, true);
+
+                    logger.info(`user - ${sessionId} disconnected and hence left meet - ${meetId}`);
+                }
+            } else {
+                logger.warn(`Unknown user got disconnected`);
+            }
         });
     });
 }

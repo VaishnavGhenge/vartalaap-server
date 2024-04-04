@@ -1,5 +1,5 @@
 import { WebSocket } from "ws";
-import { meets, sessionIdToSocketMap } from "./server";
+import { meets, sessionIdToSocketMap } from "../index";
 import { MeetEvent } from "./config";
 import logger from "../Logger/logger";
 

@@ -1,7 +1,7 @@
 import { WebSocket } from "ws";
 import { doMeetExists, getMeetPeers, initiateMeet, sendToMeetPeers, sendToPeer } from "./utils";
 import { MeetEvent } from "./config";
-import { meets, sessionIdToSocketMap } from "./server";
+import { meets, sessionIdToMeetMap, sessionIdToSocketMap } from "../index";
 import logger from "../Logger/logger";
 
 export function joinMeetLobby(meetId: string, ws: WebSocket, sessionId: string) {
@@ -14,6 +14,7 @@ export function joinMeetLobby(meetId: string, ws: WebSocket, sessionId: string) 
     if (!peersInLobby.has(sessionId)) {
         peersInLobby.add(sessionId);
         meets.set(meetId, { peersInLobby, peersInMeet });
+        sessionIdToMeetMap.set(sessionId, meetId);
     }
 
     const newUserJoinedMessage = {
@@ -46,6 +47,7 @@ export function joinMeet(meetId: string, ws: WebSocket, sessionId: string) {
     }
 
     meets.set(meetId, { peersInMeet, peersInLobby });
+    sessionIdToMeetMap.set(sessionId, meetId);
 
     const newUserJoinedMessage = {
         type: MeetEvent.PEER_JOINED,
@@ -75,6 +77,8 @@ export function leaveMeeting(meetId: string, ws: WebSocket, sessionId: string) {
         peersInLobby.delete(sessionId);
     }
     meets.set(meetId, { peersInMeet, peersInLobby });
+
+    sessionIdToMeetMap.delete(sessionId);
 
     sessionIdToSocketMap.delete(sessionId);
     sendToMeetPeers(meetId, { type: MeetEvent.PEER_LEFT, sessionId: sessionId }, ws, true);

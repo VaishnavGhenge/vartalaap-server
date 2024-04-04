@@ -6,14 +6,31 @@ import expressWinston from "express-winston";
 import { startWebSocketServer } from "./websocket/server";
 import { startRestServer } from "./rest/server";
 import cors from "cors";
+import { allowedHosts } from "./config";
+
+export const meets = new Map<string, { peersInLobby: Set<string>, peersInMeet: Set<string> }>();
+export const sessionIdToMeetMap = new Map<string, string>();
+export const sessionIdToSocketMap = new Map<string, WebSocket | null>();
+export const socketToSessionMap = new Map<WebSocket, string>();
 
 function startBackend() {
     const app = express();
     const server = http.createServer(app);
     const wss = new WebSocketServer({ server });
 
+    const corsOptions = {
+        origin: function(origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) {
+            if(origin && allowedHosts.includes(origin)) {
+                callback(null, true);
+            } else {
+                callback(new Error("Origin denied access by CORS"))
+            }
+        },
+        optionsSuccessStatus: 204,
+    }
+
     // Apply the CORS middleware
-    app.use(cors());
+    app.use(cors(corsOptions));
 
     // Log requests and responses using Express-Winston middleware
     app.use(expressWinston.logger({
