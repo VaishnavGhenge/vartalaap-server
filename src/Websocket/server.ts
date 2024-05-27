@@ -26,7 +26,6 @@ export function startWebSocketServer(wss: WebSocketServer) {
             }
 
             const sessionId = data.sessionId;
-            logger.info(`Message from ${sessionId} message: ${data.type}`);
 
             sessionIdToSocketMap.set(sessionId, ws);
             socketToSessionMap.set(ws, sessionId); // when user disconnects remove session.

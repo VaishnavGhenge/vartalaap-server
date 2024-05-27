@@ -33,6 +33,6 @@ export const createMeet = (req: IRawRequest, res: Response, next: NextFunction) 
     meets.set(meetId, {peersInMeet: new Set(), peersInLobby: new Set([sessionId])});
     sessionIdToMeetMap.set(sessionId, meetId);
 
-    logger.info(`New meet - ${meetId} created by user - ${sessionId}`)
+    logger.info(`New meet - ${meetId} created by user - ${(req as any).user.email}`);
     return res.status(201).json({ sessionId: sessionId, meetId: meetId });
 }
