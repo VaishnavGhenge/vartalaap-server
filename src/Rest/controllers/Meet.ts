@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from "express";
-import { joinMeetQueryParamsSchema } from "../../types/zod";
-import { IRawRequest, IRequest } from "../../types/httpTypes";
+import { joinMeetQueryParamsSchema } from "../../Types/zod";
+import { IRawRequest, IRequest } from "../../Types/httpTypes";
 import { meets, sessionIdToMeetMap } from "../../index";
 import logger from "../../Logger/logger";
 import { v4 as uuidv4 } from "uuid";

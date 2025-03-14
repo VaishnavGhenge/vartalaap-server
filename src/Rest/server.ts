@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction, Express } from "express";
 import { v4 as uuidv4 } from "uuid";
-import { IRawRequest } from "../types/httpTypes";
+import { IRawRequest } from "../Types/httpTypes";
 import { sessionIdToSocketMap } from "../index";
 import logger from "../Logger/logger";
 import meetRoutes from "./routes/Meet"
