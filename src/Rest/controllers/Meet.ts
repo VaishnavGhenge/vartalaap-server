@@ -27,12 +27,12 @@ export const joinMeet = (req: Request, res: Response, next: NextFunction) => {
 }
 
 export const createMeet = (req: IRawRequest, res: Response, next: NextFunction) => {
-    const meetId: string = uuidv4();
+    const meetCode: string = uuidv4();
     const sessionId: string = req.sessionId!;
 
-    meets.set(meetId, {peersInMeet: new Set(), peersInLobby: new Set([sessionId])});
-    sessionIdToMeetMap.set(sessionId, meetId);
+    meets.set(meetCode, {peersInMeet: new Set(), peersInLobby: new Set([sessionId])});
+    sessionIdToMeetMap.set(sessionId, meetCode);
 
-    logger.info(`New meet - ${meetId} created by user - ${(req as any).user.email}`);
-    return res.status(201).json({ sessionId: sessionId, meetId: meetId });
+    logger.info(`New meet - ${meetCode} created by user - ${(req as any).user.email}`);
+    return res.status(201).json({ sessionId: sessionId, meetId: meetCode });
 }
