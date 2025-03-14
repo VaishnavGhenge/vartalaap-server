@@ -1,0 +1,52 @@
+// .prettierignore
+# Dependencies
+node_modules
+dist
+
+# Build outputs
+build
+.next
+coverage
+
+# Environment and config files
+.env
+.env.*
+example.env
+
+# Docker related
+Dockerfile
+.dockerignore
+docker-compose.yml
+entrypoint.sh
+
+# Database
+*.sql
+drizzle/
+migrations/
+
+# Misc
+.git
+.gitignore
+*.log
+*.lock
+
+# .prettierrc
+{
+  "semi": true,
+  "trailingComma": "all",
+  "singleQuote": false,
+  "printWidth": 80,
+  "tabWidth": 2,
+  "useTabs": false,
+  "bracketSpacing": true,
+  "arrowParens": "avoid",
+  "endOfLine": "lf"
+}
+
+// package.json scripts update
+{
+  "scripts": {
+    "format": "prettier --write \"src/**/*.{js,jsx,ts,tsx,json,css,scss,md}\"",
+    "format:check": "prettier --check \"src/**/*.{js,jsx,ts,tsx,json,css,scss,md}\""
+  }
+}
