@@ -15,5 +15,6 @@ export const config = {
     system: {
         port: Number(process.env.PORT),
         host: process.env.HOST as string,
+        jwtSecret: process.env.JWT_SECRET as string || "secret",
     },
 };

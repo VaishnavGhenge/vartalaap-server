@@ -25,12 +25,12 @@ export const successResponse = (
 export const failureResponse = (
     resObj: Response,
     data: any,
-    { statusCode, message } = {
+    { statusCode, error } = {
         statusCode: 500,
-        message: "failure",
+        error: "Internal Server Error",
     },
 ): Response<any, Record<string, any>> => {
-    return resObj.status(statusCode).json({ message, data });
+    return resObj.status(statusCode).json({ error, data });
 };
 
 export type ControllerFunction<T extends Request = BaseRequest> = (

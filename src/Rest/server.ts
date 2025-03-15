@@ -2,10 +2,11 @@ import { Request, Response, NextFunction, Express } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { IRawRequest } from "../Types/httpTypes";
 import { sessionIdToSocketMap } from "../index";
-import logger from "../Logger/logger";
 import meetRoutes from "./routes/Meet";
 import userRoutes from "./routes/User";
 import express from "express";
+import { logger } from "../Logger/logger";
+import { failureResponse } from "./library/utils";
 
 export function startRestServer(app: Express) {
     app.get("", (req, res, next) => {
@@ -36,4 +37,20 @@ export function startRestServer(app: Express) {
 
     app.use("/meets", meetRoutes);
     app.use("/users", userRoutes);
+
+    // Error Handling Middleware
+    app.use(
+        (
+            err: any,
+            req: express.Request,
+            res: express.Response,
+            next: express.NextFunction,
+        ) => {
+            if (err instanceof Error) {
+                logger.error(err.stack);
+            }
+
+            return failureResponse(res, null);
+        },
+    );
 }
