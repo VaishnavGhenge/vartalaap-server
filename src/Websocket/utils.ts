@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 import { meets, sessionIdToSocketMap } from "../index";
-import { MeetEvent } from "./config";
+import { GeneralMessage, MeetEvent } from "./config";
 import { logger } from "../Logger/logger";
 
 export function sendToMeetPeers(
@@ -10,7 +10,7 @@ export function sendToMeetPeers(
     exemptCurrentPeer = false,
 ) {
     try {
-        const strigifiedMessage = JSON.stringify(message);
+        const stringMessage = JSON.stringify(message);
         const meetPeers = getMeetPeers(meetId);
         const meetPeerList = [
             ...meetPeers.peersInMeet,
@@ -30,10 +30,10 @@ export function sendToMeetPeers(
 
             if (client.readyState === WebSocket.OPEN) {
                 if (ws === client && exemptCurrentPeer) {
-                    client.send(strigifiedMessage);
+                    client.send(stringMessage);
                     return;
                 } else {
-                    client.send(strigifiedMessage);
+                    client.send(stringMessage);
                 }
             }
         });
@@ -57,7 +57,7 @@ export function sendToPeer(ws: WebSocket, message: any) {
 export function doMeetExists(meetId: string, ws: WebSocket) {
     if (!meets.has(meetId)) {
         sendToPeer(ws, {
-            type: MeetEvent.NOT_FOUND,
+            type: GeneralMessage.MEET_NOT_FOUND,
             message: "Meet not found",
         });
         return false;
@@ -95,6 +95,6 @@ export function initiateMeet(meetId: string, peerSessionsInMeet: Set<string>) {
             return;
         }
 
-        sendToPeer(client, { type: MeetEvent.INITIATE_MEET_REQUEST });
+        sendToPeer(client, { type: GeneralMessage.BAD_REQUEST });
     }
 }

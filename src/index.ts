@@ -19,7 +19,6 @@ export const socketToSessionMap = new Map<WebSocket, string>();
 function startBackend() {
     const app = express();
     const server = http.createServer(app);
-    const wss = new WebSocketServer({ server });
 
     const corsOptions = {
         origin: function (
@@ -58,7 +57,7 @@ function startBackend() {
     });
 
     startRestServer(app);
-    startWebSocketServer(wss);
+    startWebSocketServer(server);
 }
 
 startBackend();

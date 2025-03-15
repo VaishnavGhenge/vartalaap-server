@@ -1,20 +1,20 @@
-export enum MeetEvent {
-    NOT_FOUND = "not-found",
+export enum GeneralMessage {
     BAD_REQUEST = "bad-request",
+    MEET_NOT_FOUND = "not-found",
+}
 
-    JOIN_MEET_LOBBY = "join-meet-lobby",
+export enum MeetEvent {
+    JOIN_MEET_LOBBY = "join-meet-lobby", // Client created event
+    MEET_LOBBY_UPDATED = "meet-lobby-updated", // Server generated event
 
-    JOIN_MEET = "join-meet",
-    PEER_JOINED = "peer-joined",
+    CREATE_OFFER = "create-offer", // Client created event
+    OFFER = "offer", // Server generated event
 
-    LEAVE_MEET = "leave-meet",
-    PEER_LEFT = "peer-left",
+    CREATE_ANSWER = "create-answer", // Client created event
+    ANSWER = "answer", // Server generated event
 
-    INITIATE_MEET_REQUEST = "init-meet-request",
+    PEER_JOINED = "peer-joined", // Server generated event
 
-    CREATE_OFFER = "create-offer",
-    OFFER = "offer",
-
-    CREATE_ANSWER = "create-answer",
-    ANSWER = "answer",
+    LEAVE_MEET = "leave-meet", // Client created event
+    PEER_LEFT = "peer-left", // Server generated event
 }
