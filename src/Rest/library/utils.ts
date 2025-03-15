@@ -5,9 +5,11 @@ export interface BaseRequest extends Request {
     local: {};
 }
 
+export type TokenUserPayload = Omit<SelectUser, "password">;
+
 export interface AuthenticatedRequest extends BaseRequest {
     local: {
-        user: SelectUser;
+        user: TokenUserPayload;
     };
 }
 
@@ -24,13 +26,21 @@ export const successResponse = (
 
 export const failureResponse = (
     resObj: Response,
-    data: any,
-    { statusCode, error } = {
-        statusCode: 500,
-        error: "Internal Server Error",
-    },
+    options?: { statusCode?: number, error?: string },
 ): Response<any, Record<string, any>> => {
-    return resObj.status(statusCode).json({ error, data });
+    if (!options) {
+        options = {};
+    }
+
+    if (!options.statusCode) {
+        options.statusCode = 500;
+    }
+
+    if (!options.error) {
+        options.error = "Internal Server Error";
+    }
+
+    return resObj.status(options.statusCode).json({ error: options.error });
 };
 
 export type ControllerFunction<T extends Request = BaseRequest> = (
@@ -41,6 +51,7 @@ export type ControllerFunction<T extends Request = BaseRequest> = (
 
 export const failureHandler =
     <T extends Request>(controllerFn: ControllerFunction<T>) =>
-    (req: Request, res: Response, next: NextFunction) => {
-        void Promise.resolve(controllerFn(req as T, res, next));
-    };
+        (req: Request, res: Response, next: NextFunction) => {
+            void Promise.resolve(controllerFn(req as T, res, next));
+        };
+

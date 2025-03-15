@@ -50,7 +50,7 @@ export function startRestServer(app: Express) {
                 logger.error(err.stack);
             }
 
-            return failureResponse(res, null);
+            return failureResponse(res);
         },
     );
 }

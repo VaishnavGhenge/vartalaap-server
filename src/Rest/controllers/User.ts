@@ -2,9 +2,8 @@ import { Request, Response, NextFunction } from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { loginSchema, registerSchema } from "../validators/User";
-import { z } from "zod";
 import { db } from "../../Config/database";
-import { userTable } from "../../Schema";
+import { SelectUser, userTable } from "../../Schema";
 import { eq } from "drizzle-orm";
 import { failureResponse, successResponse } from "../library/utils";
 import { config } from "../../Config/config";
@@ -55,22 +54,22 @@ export const login = async (
     const { email, password } = req.body as ValidatedSchema<typeof loginSchema>;
 
     // Check if user exists
-    const user = await db().query.userTable.findFirst({
+    const user: SelectUser | undefined = await db().query.userTable.findFirst({
         where: eq(userTable.email, email),
     });
     if (!user) {
-        return failureResponse(res, null, { error: "User not found", statusCode: 404 });
+        return failureResponse(res, { error: "User not found", statusCode: 404 });
     }
 
     // Verify password
     const passwordMatch = await bcrypt.compare(password, user.password);
     if (!passwordMatch) {
-        return failureResponse(res, null, { error: "Invalid credentials", statusCode: 401 });
+        return failureResponse(res, { error: "Invalid credentials", statusCode: 401 });
     }
 
     // Password is correct, generate JWT token
-    const token = jwt.sign({ userId: user.id }, config.system.jwtSecret, {
-        expiresIn: "1h",
+    const token = jwt.sign({ user: { ...user, password: undefined } }, config.system.jwtSecret, {
+        expiresIn: "10d",
     });
 
     // Return JWT token

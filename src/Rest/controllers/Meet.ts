@@ -46,7 +46,7 @@ export const createMeet = (
     sessionIdToMeetMap.set(sessionId, meetCode);
 
     logger.info(
-        `New meet - ${meetCode} created by user - ${(req as any).user.email}`,
+        `New meet - ${meetCode} created by user - ${sessionId}`,
     );
     return res.status(201).json({ sessionId: sessionId, meetId: meetCode });
 };
