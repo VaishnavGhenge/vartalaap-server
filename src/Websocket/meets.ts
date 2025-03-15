@@ -1,10 +1,20 @@
 import { WebSocket } from "ws";
-import { doMeetExists, getMeetPeers, initiateMeet, sendToMeetPeers, sendToPeer } from "./utils";
+import {
+    doMeetExists,
+    getMeetPeers,
+    initiateMeet,
+    sendToMeetPeers,
+    sendToPeer,
+} from "./utils";
 import { MeetEvent } from "./config";
 import { meets, sessionIdToMeetMap, sessionIdToSocketMap } from "../index";
 import logger from "../Logger/logger";
 
-export function joinMeetLobby(meetId: string, ws: WebSocket, sessionId: string) {
+export function joinMeetLobby(
+    meetId: string,
+    ws: WebSocket,
+    sessionId: string,
+) {
     if (!doMeetExists(meetId, ws)) {
         return;
     }
@@ -39,7 +49,10 @@ export function joinMeet(meetId: string, ws: WebSocket, sessionId: string) {
 
     if (!peersInMeet.has(sessionId)) {
         if (peersInMeet.size === 2) {
-            sendToPeer(ws, { type: MeetEvent.BAD_REQUEST, message: "Meet is full" });
+            sendToPeer(ws, {
+                type: MeetEvent.BAD_REQUEST,
+                message: "Meet is full",
+            });
             return;
         }
 
@@ -81,58 +94,79 @@ export function leaveMeeting(meetId: string, ws: WebSocket, sessionId: string) {
     sessionIdToMeetMap.delete(sessionId);
 
     sessionIdToSocketMap.delete(sessionId);
-    sendToMeetPeers(meetId, { type: MeetEvent.PEER_LEFT, sessionId: sessionId }, ws, true);
+    sendToMeetPeers(
+        meetId,
+        { type: MeetEvent.PEER_LEFT, sessionId: sessionId },
+        ws,
+        true,
+    );
 
     logger.info(`${sessionId} left meeting ${meetId}`);
 }
 
-export function createOffer(meetId: string, ws: WebSocket, sessionId: string, offer: RTCDataChannelEventInit) {
-    if(!doMeetExists(meetId, ws)) {
+export function createOffer(
+    meetId: string,
+    ws: WebSocket,
+    sessionId: string,
+    offer: RTCDataChannelEventInit,
+) {
+    if (!doMeetExists(meetId, ws)) {
         return;
     }
 
     const meetPeers = meets.get(meetId) || null;
-    if(meetPeers === null) {
+    if (meetPeers === null) {
         logger.error("Logical error: meet peers empty");
         return;
     }
 
-    const peerToOffer = Array.from(meetPeers.peersInMeet).find((peerSessionId) => peerSessionId !== sessionId) || null;
+    const peerToOffer =
+        Array.from(meetPeers.peersInMeet).find(
+            (peerSessionId) => peerSessionId !== sessionId,
+        ) || null;
 
-    if(peerToOffer === null) {
+    if (peerToOffer === null) {
         logger.error("Logical Error: Peer not found to send peer");
         return;
     }
 
     const peerToOfferSocket = sessionIdToSocketMap.get(peerToOffer) || null;
 
-    if(peerToOfferSocket === null) {
+    if (peerToOfferSocket === null) {
         logger.error("Logical Error: Socket not found for peer to offer");
         return;
     }
 
-    sendToPeer(peerToOfferSocket, {type: MeetEvent.OFFER, offer: offer});
+    sendToPeer(peerToOfferSocket, { type: MeetEvent.OFFER, offer: offer });
 
     logger.info(`Offer sent to ${peerToOffer} on meet ${meetId}`);
 }
 
-export function answer(meetId: string, ws: WebSocket, sessionId: string, answer: any) {
+export function answer(
+    meetId: string,
+    ws: WebSocket,
+    sessionId: string,
+    answer: any,
+) {
     const meetPeers = meets.get(meetId) || null;
-    if(meetPeers === null) {
+    if (meetPeers === null) {
         logger.error("Logical error: meet peers empty");
         return;
     }
 
-    const peerToAnswer = Array.from(meetPeers.peersInMeet).find((peerSessionId) => peerSessionId !== sessionId) || null;
+    const peerToAnswer =
+        Array.from(meetPeers.peersInMeet).find(
+            (peerSessionId) => peerSessionId !== sessionId,
+        ) || null;
 
-    if(peerToAnswer === null) {
+    if (peerToAnswer === null) {
         logger.error("Logical Error: Peer not found to send peer");
         return;
     }
 
     const peerToAnswerSocket = sessionIdToSocketMap.get(peerToAnswer) || null;
 
-    if(peerToAnswerSocket === null) {
+    if (peerToAnswerSocket === null) {
         logger.error("Logical Error: Socket not found for peer to answer");
         return;
     }

@@ -12,7 +12,9 @@
     "generate": "drizzle-kit generate",
     "migrate": "drizzle-kit migrate",
     "studio": "npx drizzle-kit studio --host 0.0.0.0 --port 3000 --verbose",
-    "drop": "drizzle-kit drop"
+    "drop": "drizzle-kit drop",
+    "format": "prettier --write src/**/*.{js,jsx,ts,tsx,json,css,scss,md}",
+    "format:check": "prettier --check src/**/*.{js,jsx,ts,tsx,json,css,scss,md}"
   },
   "author": "Vaishnav Ghenge",
   "license": "ISC",
@@ -23,14 +25,14 @@
     "@types/node": "^20.11.8",
     "@types/uuid": "^9.0.8",
     "@types/ws": "^8.5.10",
-    "drizzle-kit": "^0.30.5",
+    "drizzle-kit": "^0.19.1",
     "nodemon": "^3.0.3",
+    "prettier": "^3.5.3",
     "ts-node": "^10.9.2",
     "tsx": "^4.19.3",
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "@prisma/client": "^5.14.0",
     "@types/cors": "^2.8.17",
     "bcrypt": "^5.1.1",
     "cors": "^2.8.5",

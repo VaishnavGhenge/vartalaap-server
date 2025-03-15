@@ -3,8 +3,18 @@ import logger from "../Logger/logger";
 import { IMessageData } from "../Types/webcocketTypes";
 import { MeetEvent } from "./config";
 import { getMeetPeers, sendToMeetPeers, sendToPeer } from "./utils";
-import { answer, createOffer, joinMeet, joinMeetLobby, leaveMeeting } from "./meets";
-import { sessionIdToMeetMap, sessionIdToSocketMap, socketToSessionMap } from "../index";
+import {
+    answer,
+    createOffer,
+    joinMeet,
+    joinMeetLobby,
+    leaveMeeting,
+} from "./meets";
+import {
+    sessionIdToMeetMap,
+    sessionIdToSocketMap,
+    socketToSessionMap,
+} from "../index";
 
 export function startWebSocketServer(wss: WebSocketServer) {
     wss.on("connection", (ws: WebSocket) => {
@@ -21,7 +31,10 @@ export function startWebSocketServer(wss: WebSocketServer) {
             }
 
             if (!data.sessionId) {
-                sendToPeer(ws, { type: MeetEvent.BAD_REQUEST, message: "Missing sessionId in message data." });
+                sendToPeer(ws, {
+                    type: MeetEvent.BAD_REQUEST,
+                    message: "Missing sessionId in message data.",
+                });
                 return;
             }
 
@@ -59,10 +72,10 @@ export function startWebSocketServer(wss: WebSocketServer) {
 
         ws.on("close", () => {
             // Remove the session from the sessions map when the WebSocket connection is closed
-            if(socketToSessionMap.has(ws)) {
+            if (socketToSessionMap.has(ws)) {
                 const sessionId = socketToSessionMap.get(ws)!;
 
-                if(sessionIdToMeetMap.has(sessionId)) {
+                if (sessionIdToMeetMap.has(sessionId)) {
                     const meetId = sessionIdToMeetMap.get(sessionId)!;
 
                     const meetPeers = getMeetPeers(meetId);
@@ -81,7 +94,9 @@ export function startWebSocketServer(wss: WebSocketServer) {
                     };
                     sendToMeetPeers(meetId, leaveMessage, ws, true);
 
-                    logger.info(`user - ${sessionId} disconnected and hence left meet - ${meetId}`);
+                    logger.info(
+                        `user - ${sessionId} disconnected and hence left meet - ${meetId}`,
+                    );
                 }
             } else {
                 logger.warn(`Unknown user got disconnected`);

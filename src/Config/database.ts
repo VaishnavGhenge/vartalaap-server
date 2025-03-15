@@ -45,9 +45,7 @@ const checkConnection = async () => {
         await database.execute(sql`select 1`);
         logger.info(`Connected to database at ${config.db.url}`);
     } catch (error) {
-        logger.error(
-            `Failed to connect to database at ${config.db.url}`,
-        );
+        logger.error(`Failed to connect to database at ${config.db.url}`);
         throw error;
     }
 };

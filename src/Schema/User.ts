@@ -6,7 +6,9 @@ export const userTable = pgTable("user", {
     password: varchar("password", { length: 255 }).notNull(),
     firstName: varchar("first_name", { length: 255 }).notNull(),
     lastName: varchar("last_name", { length: 255 }).notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+        .notNull()
+        .defaultNow(),
     updatedAt: timestamp("updated_at")
         .notNull()
         .$onUpdate(() => new Date()),

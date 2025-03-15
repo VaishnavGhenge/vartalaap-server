@@ -22,17 +22,31 @@ export const joinMeet = (req: Request, res: Response, next: NextFunction) => {
         logger.warn(`Parameters not valid for join-meet request`);
 
         // Zod validation failed
-        return res.status(400).json({ message: "Invalid request parameters", error: error.errors });
+        return res
+            .status(400)
+            .json({
+                message: "Invalid request parameters",
+                error: error.errors,
+            });
     }
-}
+};
 
-export const createMeet = (req: IRawRequest, res: Response, next: NextFunction) => {
+export const createMeet = (
+    req: IRawRequest,
+    res: Response,
+    next: NextFunction,
+) => {
     const meetCode: string = uuidv4();
     const sessionId: string = req.sessionId!;
 
-    meets.set(meetCode, {peersInMeet: new Set(), peersInLobby: new Set([sessionId])});
+    meets.set(meetCode, {
+        peersInMeet: new Set(),
+        peersInLobby: new Set([sessionId]),
+    });
     sessionIdToMeetMap.set(sessionId, meetCode);
 
-    logger.info(`New meet - ${meetCode} created by user - ${(req as any).user.email}`);
+    logger.info(
+        `New meet - ${meetCode} created by user - ${(req as any).user.email}`,
+    );
     return res.status(201).json({ sessionId: sessionId, meetId: meetCode });
-}
+};

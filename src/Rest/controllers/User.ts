@@ -4,14 +4,23 @@ import jwt from "jsonwebtoken";
 import { loginSchema, registerSchema } from "../validators/User";
 import { z } from "zod";
 import { db } from "../../Config/database";
+import { userTable } from "../../Schema";
+import { eq } from "drizzle-orm";
+import { successResponse } from "../library/utils";
 
-export const register = async (req: Request, res: Response, next: NextFunction) => {
+export const register = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+) => {
     try {
-        const { firstName, lastName, email, password } = registerSchema.parse(req.body);
+        const { firstName, lastName, email, password } = registerSchema.parse(
+            req.body,
+        );
 
         // Check if user already exists
-        const existingUser = await db()..findUnique({
-            where: { email },
+        const existingUser = await db().query.userTable.findFirst({
+            where: eq(userTable.email, email),
         });
         if (existingUser) {
             return res.status(400).json({ error: "User already exists" });
@@ -21,17 +30,22 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
         const hashedPassword = await bcrypt.hash(password, 10);
 
         // Create the user
-        const user = await prisma.user.create({
-            data: {
-                email,
-                password: hashedPassword,
+        const user = await db()
+            .insert(userTable)
+            .values({
                 firstName,
                 lastName,
-            },
-        });
+                email,
+                password: hashedPassword,
+            })
+            .returning()
+            .execute();
 
         // Return success response
-        return res.status(201).json({ message: "User registered successfully", user });
+        return successResponse(res, user, {
+            statusCode: 201,
+            message: "User registered successfully",
+        });
     } catch (error) {
         if (error instanceof z.ZodError) {
             return res.status(400).json({ error: error.message });
@@ -41,13 +55,17 @@ export const register = async (req: Request, res: Response, next: NextFunction) 
     }
 };
 
-export const login = async (req: Request, res: Response, next: NextFunction) => {
+export const login = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+) => {
     try {
         const { email, password } = loginSchema.parse(req.body);
 
         // Check if user exists
         const user = await prisma.user.findUnique({
-            where: { email }
+            where: { email },
         });
         if (!user) {
             return res.status(404).json({ error: "User not found" });
@@ -62,12 +80,14 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
         const jwtSecret = process.env.JWT_SECRET || "secret";
 
         // Password is correct, generate JWT token
-        const token = jwt.sign({ userId: user.id }, jwtSecret, { expiresIn: '1h' });
+        const token = jwt.sign({ userId: user.id }, jwtSecret, {
+            expiresIn: "1h",
+        });
 
         // Return JWT token
         return res.status(200).json({ user, token });
     } catch (error) {
-        if(error instanceof z.ZodError) {
+        if (error instanceof z.ZodError) {
             return res.status(400).json({ error: error.message });
         }
 

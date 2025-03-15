@@ -1,4 +1,4 @@
-import { z } from "zod"
+import { z } from "zod";
 
 export const baseRequestBodySchema = z.object({
     sessionId: z.string(),
@@ -7,4 +7,4 @@ export const baseRequestBodySchema = z.object({
 
 export const joinMeetQueryParamsSchema = z.object({
     meetId: z.string(),
-})
+});

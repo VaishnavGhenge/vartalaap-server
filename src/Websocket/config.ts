@@ -2,7 +2,7 @@ export enum MeetEvent {
     NOT_FOUND = "not-found",
     BAD_REQUEST = "bad-request",
 
-    JOIN_MEET_LOBBY = 'join-meet-lobby',
+    JOIN_MEET_LOBBY = "join-meet-lobby",
 
     JOIN_MEET = "join-meet",
     PEER_JOINED = "peer-joined",

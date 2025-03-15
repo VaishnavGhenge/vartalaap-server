@@ -3,16 +3,13 @@ import { v4 as uuidv4 } from "uuid";
 import { IRawRequest } from "../Types/httpTypes";
 import { sessionIdToSocketMap } from "../index";
 import logger from "../Logger/logger";
-import meetRoutes from "./routes/Meet"
+import meetRoutes from "./routes/Meet";
 import userRoutes from "./routes/User";
 import express from "express";
 
-export function startRestServer(
-    app: Express,
-) {
-
+export function startRestServer(app: Express) {
     app.get("", (req, res, next) => {
-        return res.status(200).json({"status": "ok"});
+        return res.status(200).json({ status: "ok" });
     });
 
     // Middleware to parse JSON request bodies
@@ -28,7 +25,9 @@ export function startRestServer(
 
             logger.info(`First connection by user ${newSessionId}`);
         } else if (!sessionIdToSocketMap.has(req.params.sessionId)) {
-            logger.warn(`Invalid session Id declined connection to rest server`);
+            logger.warn(
+                `Invalid session Id declined connection to rest server`,
+            );
             return res.status(400).json({ message: "Invalid session Id" });
         }
 
