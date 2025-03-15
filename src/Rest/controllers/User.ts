@@ -1,18 +1,16 @@
 import { Request, Response, NextFunction } from "express";
-import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { loginSchema, registerSchema } from "../validators/User";
 import { z } from "zod";
-
-const prisma = new PrismaClient();
+import { db } from "../../Config/database";
 
 export const register = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const { firstName, lastName, email, password } = registerSchema.parse(req.body);
 
         // Check if user already exists
-        const existingUser = await prisma.user.findUnique({
+        const existingUser = await db()..findUnique({
             where: { email },
         });
         if (existingUser) {

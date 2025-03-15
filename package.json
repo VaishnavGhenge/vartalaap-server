@@ -7,8 +7,12 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "prebuild": "rm -rf dist/",
     "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "nodemon"
+    "start": "node dist/src/index.js",
+    "dev": "nodemon",
+    "generate": "drizzle-kit generate",
+    "migrate": "drizzle-kit migrate",
+    "studio": "npx drizzle-kit studio --host 0.0.0.0 --port 3000 --verbose",
+    "drop": "drizzle-kit drop"
   },
   "author": "Vaishnav Ghenge",
   "license": "ISC",

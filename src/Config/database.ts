@@ -1,7 +1,7 @@
 import { drizzle, PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
-import * as schema from "../Rest/schema";
+import * as schema from "../Schema";
 import { sql } from "drizzle-orm";
 import logger from "../Logger/logger";
 import { config } from "./config";
