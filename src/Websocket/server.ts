@@ -1,5 +1,5 @@
 import { WebSocket, Server as WebSocketServer } from "ws";
-import logger from "../Logger/logger";
+import { logger } from "../Logger/logger";
 import { IMessageData } from "../Types/webcocketTypes";
 import { MeetEvent } from "./config";
 import { getMeetPeers, sendToMeetPeers, sendToPeer } from "./utils";

@@ -8,7 +8,7 @@ import {
 } from "./utils";
 import { MeetEvent } from "./config";
 import { meets, sessionIdToMeetMap, sessionIdToSocketMap } from "../index";
-import logger from "../Logger/logger";
+import { logger } from "../Logger/logger";
 
 export function joinMeetLobby(
     meetId: string,

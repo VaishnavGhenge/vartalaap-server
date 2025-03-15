@@ -2,8 +2,8 @@ import { NextFunction, Request, Response } from "express";
 import { joinMeetQueryParamsSchema } from "../../Types/zod";
 import { IRawRequest, IRequest } from "../../Types/httpTypes";
 import { meets, sessionIdToMeetMap } from "../../index";
-import logger from "../../Logger/logger";
 import { v4 as uuidv4 } from "uuid";
+import { logger } from "../../Logger/logger";
 
 export const joinMeet = (req: Request, res: Response, next: NextFunction) => {
     try {

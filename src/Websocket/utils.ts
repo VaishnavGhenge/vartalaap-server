@@ -1,7 +1,7 @@
 import { WebSocket } from "ws";
 import { meets, sessionIdToSocketMap } from "../index";
 import { MeetEvent } from "./config";
-import logger from "../Logger/logger";
+import { logger } from "../Logger/logger";
 
 export function sendToMeetPeers(
     meetId: string,

@@ -1,7 +1,7 @@
 import express from "express";
 import http from "http";
 import { Server as WebSocketServer, WebSocket } from "ws";
-import logger from "./Logger/logger";
+import { logger } from "./Logger/logger";
 import expressWinston from "express-winston";
 import { startWebSocketServer } from "./Websocket/server";
 import { startRestServer } from "./Rest/server";

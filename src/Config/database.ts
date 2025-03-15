@@ -3,7 +3,7 @@ import postgres from "postgres";
 
 import * as schema from "../Schema";
 import { sql } from "drizzle-orm";
-import logger from "../Logger/logger";
+import { logger } from "../Logger/logger";
 import { config } from "./config";
 
 if (!config.db.url) {
