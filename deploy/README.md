@@ -7,6 +7,8 @@ sudo useradd -r -s /bin/false vartalaap
 sudo mkdir -p /opt/vartalaap
 sudo chown vartalaap:vartalaap /opt/vartalaap
 sudo cp deploy/vartalaap.service /etc/systemd/system/
+sudo cp deploy/nginx-api.conf /etc/nginx/sites-available/vartalaap-api
+sudo ln -s /etc/nginx/sites-available/vartalaap-api /etc/nginx/sites-enabled/vartalaap-api
 sudo systemctl daemon-reload
 sudo systemctl enable vartalaap
 ```
@@ -17,7 +19,7 @@ Create `/opt/vartalaap/.env`:
 CF_TURN_KEY_ID=...
 CF_TURN_API_TOKEN=...
 PORT=8080
-ALLOWED_ORIGINS=https://<your-client-domain>
+ALLOWED_ORIGINS=https://vartalaap.vaishnavghenge.com
 ```
 
 ## Deploying from local machine
@@ -25,6 +27,8 @@ ALLOWED_ORIGINS=https://<your-client-domain>
 ```bash
 ./deploy/deploy.sh
 ```
+
+That script builds the Linux binary, installs the systemd unit, installs the nginx vhost for `REDACTED_DOMAIN`, and runs Certbot to enable HTTPS.
 
 ## Verify on VM
 
