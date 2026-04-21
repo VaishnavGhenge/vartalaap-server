@@ -29,7 +29,7 @@ func (h *Hub) join(c *Client, roomID string) {
 		room = newRoom(roomID)
 		h.rooms[roomID] = room
 	}
-	existing := room.peerIDs()
+	existing := room.peerInfos()
 	room.add(c)
 	c.room = roomID
 	h.mu.Unlock()
@@ -37,7 +37,10 @@ func (h *Hub) join(c *Client, roomID string) {
 	joinedData, _ := json.Marshal(JoinedData{Peers: existing})
 	c.sendJSON(&Envelope{Type: MsgJoined, Room: roomID, Data: joinedData})
 
-	evt, _ := json.Marshal(PeerEventData{PeerID: c.id})
+	info := c.info()
+	evt, _ := json.Marshal(PeerJoinedData{
+		PeerID: info.ID, Name: info.Name, Audio: info.Audio, Video: info.Video,
+	})
 	payload, _ := json.Marshal(Envelope{Type: MsgPeerJoined, Room: roomID, From: c.id, Data: evt})
 	room.broadcastExcept(c.id, payload)
 }
@@ -59,8 +62,20 @@ func (h *Hub) leaveAll(c *Client) {
 	h.gcLocked(room)
 	h.mu.Unlock()
 
-	evt, _ := json.Marshal(PeerEventData{PeerID: c.id})
+	evt, _ := json.Marshal(PeerLeftData{PeerID: c.id})
 	payload, _ := json.Marshal(Envelope{Type: MsgPeerLeft, Room: roomID, From: c.id, Data: evt})
+	room.broadcastExcept(c.id, payload)
+}
+
+func (h *Hub) broadcastState(c *Client, st PeerStateData) {
+	h.mu.Lock()
+	room := h.rooms[c.room]
+	h.mu.Unlock()
+	if room == nil {
+		return
+	}
+	data, _ := json.Marshal(st)
+	payload, _ := json.Marshal(Envelope{Type: MsgPeerState, Room: c.room, From: c.id, Data: data})
 	room.broadcastExcept(c.id, payload)
 }
 

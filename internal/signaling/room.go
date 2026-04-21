@@ -30,14 +30,14 @@ func (r *Room) empty() bool {
 	return len(r.members) == 0
 }
 
-func (r *Room) peerIDs() []string {
+func (r *Room) peerInfos() []PeerInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	ids := make([]string, 0, len(r.members))
-	for id := range r.members {
-		ids = append(ids, id)
+	infos := make([]PeerInfo, 0, len(r.members))
+	for _, c := range r.members {
+		infos = append(infos, c.info())
 	}
-	return ids
+	return infos
 }
 
 func (r *Room) get(peerID string) *Client {

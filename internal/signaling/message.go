@@ -11,6 +11,7 @@ const (
 	MsgLeave      MsgType = "leave"
 	MsgPeerJoined MsgType = "peer-joined"
 	MsgPeerLeft   MsgType = "peer-left"
+	MsgPeerState  MsgType = "peer-state"
 	MsgSignal     MsgType = "signal"
 	MsgError      MsgType = "error"
 )
@@ -23,12 +24,37 @@ type Envelope struct {
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
-type JoinedData struct {
-	Peers []string `json:"peers"`
+type PeerInfo struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Audio bool   `json:"audio"`
+	Video bool   `json:"video"`
 }
 
-type PeerEventData struct {
+type JoinData struct {
+	Name  string `json:"name"`
+	Audio bool   `json:"audio"`
+	Video bool   `json:"video"`
+}
+
+type JoinedData struct {
+	Peers []PeerInfo `json:"peers"`
+}
+
+type PeerJoinedData struct {
 	PeerID string `json:"peerId"`
+	Name   string `json:"name"`
+	Audio  bool   `json:"audio"`
+	Video  bool   `json:"video"`
+}
+
+type PeerLeftData struct {
+	PeerID string `json:"peerId"`
+}
+
+type PeerStateData struct {
+	Audio bool `json:"audio"`
+	Video bool `json:"video"`
 }
 
 type ErrorData struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -15,6 +16,24 @@ type Client struct {
 	hub  *Hub
 	send chan []byte
 	room string
+
+	mu    sync.RWMutex
+	name  string
+	audio bool
+	video bool
+}
+
+func (c *Client) info() PeerInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return PeerInfo{ID: c.id, Name: c.name, Audio: c.audio, Video: c.video}
+}
+
+func (c *Client) setState(audio, video bool) {
+	c.mu.Lock()
+	c.audio = audio
+	c.video = video
+	c.mu.Unlock()
 }
 
 func (c *Client) writePump(ctx context.Context) {
@@ -60,9 +79,25 @@ func (c *Client) handle(env *Envelope) {
 			c.sendError("join requires room")
 			return
 		}
+		var jd JoinData
+		if len(env.Data) > 0 {
+			_ = json.Unmarshal(env.Data, &jd)
+		}
+		c.mu.Lock()
+		c.name = jd.Name
+		c.audio = jd.Audio
+		c.video = jd.Video
+		c.mu.Unlock()
 		c.hub.join(c, env.Room)
 	case MsgLeave:
 		c.hub.leaveAll(c)
+	case MsgPeerState:
+		var st PeerStateData
+		if len(env.Data) > 0 {
+			_ = json.Unmarshal(env.Data, &st)
+		}
+		c.setState(st.Audio, st.Video)
+		c.hub.broadcastState(c, st)
 	case MsgSignal:
 		if env.To == "" {
 			c.sendError("signal requires 'to'")
