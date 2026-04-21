@@ -1,0 +1,16 @@
+[Unit]
+Description=Vartalaap signaling server
+After=network.target
+
+[Service]
+Type=simple
+User=vartalaap
+WorkingDirectory=/opt/vartalaap
+EnvironmentFile=/opt/vartalaap/.env
+ExecStart=/opt/vartalaap/vartalaap
+Restart=always
+RestartSec=5s
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target
