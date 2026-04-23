@@ -33,8 +33,13 @@ func NewIceHandler(cf *cfturn.Client, allowedOrigins []string) http.HandlerFunc 
 
 		creds, err := cf.Generate(ctx, 3600) // 1 hour
 		if err != nil {
-			http.Error(w, "failed to mint credentials: "+err.Error(), http.StatusBadGateway)
-			return
+			// Cloudflare TURN unavailable — return a public STUN fallback so
+			// peers can still connect on the same network (e.g. localhost dev).
+			creds = cfturn.CredentialsResponse{
+				IceServers: []cfturn.IceServer{
+					{URLs: []string{"stun:stun.l.google.com:19302"}},
+				},
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
