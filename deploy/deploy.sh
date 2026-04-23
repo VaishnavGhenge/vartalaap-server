@@ -21,12 +21,15 @@ echo "==> Building linux binary..."
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$LOCAL_BIN" ./cmd/server
 
 echo "==> Uploading artifacts..."
+# Substitute DEPLOY_DOMAIN into the nginx template before uploading
+NGINX_TMP=$(mktemp)
+DEPLOY_DOMAIN="$DEPLOY_DOMAIN" envsubst '$DEPLOY_DOMAIN' < deploy/nginx-api.conf > "$NGINX_TMP"
+
 scp -i "$DEPLOY_SSH_KEY" -o ServerAliveInterval=30 -o ConnectTimeout=15 \
-  "$LOCAL_BIN" \
-  deploy/vartalaap.service \
-  deploy/nginx-api.conf \
-  .env \
-  "$DEPLOY_SERVER:/tmp/"
+  "$LOCAL_BIN" deploy/vartalaap.service .env "$DEPLOY_SERVER:/tmp/"
+scp -i "$DEPLOY_SSH_KEY" -o ServerAliveInterval=30 -o ConnectTimeout=15 \
+  "$NGINX_TMP" "$DEPLOY_SERVER:/tmp/nginx-api.conf"
+rm "$NGINX_TMP"
 
 echo "==> Installing and restarting service..."
 $SSH "$DEPLOY_SERVER" DEPLOY_DOMAIN="$DEPLOY_DOMAIN" bash <<'REMOTE'
@@ -45,8 +48,9 @@ $SSH "$DEPLOY_SERVER" DEPLOY_DOMAIN="$DEPLOY_DOMAIN" bash <<'REMOTE'
   install -m 755 -o vartalaap -g vartalaap /tmp/vartalaap /opt/vartalaap/vartalaap
   nginx -t
   systemctl daemon-reload
-  systemctl enable --now vartalaap
-  certbot --nginx -d "$DEPLOY_DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
+  systemctl enable vartalaap
+  systemctl restart vartalaap
+  certbot --nginx -d "$DEPLOY_DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email || true
   systemctl reload nginx
   sleep 2
   systemctl is-active vartalaap
