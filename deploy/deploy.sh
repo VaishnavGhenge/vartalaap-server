@@ -2,9 +2,17 @@
 
 set -euo pipefail
 
-SERVER="root@REDACTED_SERVER_IP"
-SSH_KEY="$HOME/.ssh/REDACTED_SSH_KEY"
-SSH="ssh -i $SSH_KEY -o ServerAliveInterval=30 -o ConnectTimeout=15"
+# Load deploy env vars if file exists (never commit .env.deploy)
+if [ -f "$(dirname "$0")/.env.deploy" ]; then
+  # shellcheck disable=SC1091
+  source "$(dirname "$0")/.env.deploy"
+fi
+
+DEPLOY_SERVER="${DEPLOY_SERVER:?DEPLOY_SERVER is required (e.g. root@1.2.3.4)}"
+DEPLOY_SSH_KEY="${DEPLOY_SSH_KEY:-$HOME/.ssh/id_rsa}"
+DEPLOY_DOMAIN="${DEPLOY_DOMAIN:?DEPLOY_DOMAIN is required (e.g. api.example.com)}"
+
+SSH="ssh -i $DEPLOY_SSH_KEY -o ServerAliveInterval=30 -o ConnectTimeout=15"
 BIN_NAME="vartalaap"
 LOCAL_BIN="./$BIN_NAME"
 REMOTE_DIR="/opt/vartalaap"
@@ -13,15 +21,15 @@ echo "==> Building linux binary..."
 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$LOCAL_BIN" ./cmd/server
 
 echo "==> Uploading artifacts..."
-scp -i "$SSH_KEY" -o ServerAliveInterval=30 -o ConnectTimeout=15 \
+scp -i "$DEPLOY_SSH_KEY" -o ServerAliveInterval=30 -o ConnectTimeout=15 \
   "$LOCAL_BIN" \
   deploy/vartalaap.service \
   deploy/nginx-api.conf \
   .env \
-  "$SERVER:/tmp/"
+  "$DEPLOY_SERVER:/tmp/"
 
 echo "==> Installing and restarting service..."
-$SSH "$SERVER" bash <<'REMOTE'
+$SSH "$DEPLOY_SERVER" DEPLOY_DOMAIN="$DEPLOY_DOMAIN" bash <<'REMOTE'
   set -euo pipefail
   if ! id -u vartalaap >/dev/null 2>&1; then
     useradd -r -s /bin/false vartalaap
@@ -38,7 +46,7 @@ $SSH "$SERVER" bash <<'REMOTE'
   nginx -t
   systemctl daemon-reload
   systemctl enable --now vartalaap
-  certbot --nginx -d REDACTED_DOMAIN --non-interactive --agree-tos --register-unsafely-without-email
+  certbot --nginx -d "$DEPLOY_DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
   systemctl reload nginx
   sleep 2
   systemctl is-active vartalaap
