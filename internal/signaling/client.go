@@ -104,6 +104,8 @@ func (c *Client) handle(env *Envelope) {
 			return
 		}
 		c.hub.forwardSignal(c, env)
+	case MsgPing:
+		c.sendJSON(&Envelope{Type: MsgPong})
 	default:
 		c.sendError("unknown message type: " + string(env.Type))
 	}

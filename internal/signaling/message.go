@@ -14,6 +14,8 @@ const (
 	MsgPeerState  MsgType = "peer-state"
 	MsgSignal     MsgType = "signal"
 	MsgError      MsgType = "error"
+	MsgPing       MsgType = "ping"
+	MsgPong       MsgType = "pong"
 )
 
 type Envelope struct {
