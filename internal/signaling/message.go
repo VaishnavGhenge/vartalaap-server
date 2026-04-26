@@ -53,8 +53,9 @@ type PeerLeftData struct {
 }
 
 type PeerStateData struct {
-	Audio bool `json:"audio"`
-	Video bool `json:"video"`
+	Audio   bool `json:"audio"`
+	Video   bool `json:"video"`
+	Speaking bool `json:"speaking,omitempty"`
 }
 
 type ErrorData struct {
