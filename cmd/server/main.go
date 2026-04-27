@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/getsentry/sentry-go"
+	sentryhttp "github.com/getsentry/sentry-go/http"
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfturn"
 	"github.com/vaishnavghenge/vartalaap-server/internal/config"
 	"github.com/vaishnavghenge/vartalaap-server/internal/httpx"
@@ -13,6 +15,19 @@ import (
 
 func main() {
 	cfg := config.Load()
+
+	if cfg.SentryDSN != "" {
+		if err := sentry.Init(sentry.ClientOptions{
+			Dsn:              cfg.SentryDSN,
+			TracesSampleRate: 0.2,
+		}); err != nil {
+			log.Printf("WARN: sentry init failed: %v", err)
+		} else {
+			defer sentry.Flush(2 * time.Second)
+			log.Println("Sentry enabled")
+		}
+	}
+
 	hub := signaling.NewHub()
 	cf := cfturn.New(cfg.CFTurnKeyID, cfg.CFTurnAPIToken)
 
@@ -23,9 +38,11 @@ func main() {
 	mux.HandleFunc("/ws", signaling.NewHandler(hub, cfg.AllowedOrigins))
 	mux.HandleFunc("/ice-servers", httpx.NewIceHandler(cf, cfg.AllowedOrigins))
 
+	sentinel := sentryhttp.New(sentryhttp.Options{Repanic: true})
+
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           mux,
+		Handler:           sentinel.Handle(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Printf("vartalaap-server listening on :%s", cfg.Port)

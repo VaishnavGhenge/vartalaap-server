@@ -11,6 +11,7 @@ type Config struct {
 	AllowedOrigins []string
 	CFTurnKeyID    string
 	CFTurnAPIToken string
+	SentryDSN      string
 }
 
 func Load() Config {
@@ -19,6 +20,7 @@ func Load() Config {
 		AllowedOrigins: splitCSV(getenv("ALLOWED_ORIGINS", "http://localhost:3000")),
 		CFTurnKeyID:    os.Getenv("CF_TURN_KEY_ID"),
 		CFTurnAPIToken: os.Getenv("CF_TURN_API_TOKEN"),
+		SentryDSN:      os.Getenv("SENTRY_DSN"),
 	}
 	if cfg.CFTurnKeyID == "" || cfg.CFTurnAPIToken == "" {
 		log.Println("WARN: CF_TURN_KEY_ID / CF_TURN_API_TOKEN not set — /ice-servers will fail")

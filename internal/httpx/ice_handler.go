@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfturn"
 )
 
@@ -33,6 +34,7 @@ func NewIceHandler(cf *cfturn.Client, allowedOrigins []string) http.HandlerFunc 
 
 		creds, err := cf.Generate(ctx, 3600) // 1 hour
 		if err != nil {
+			sentry.CaptureException(err)
 			// Cloudflare TURN unavailable — return a public STUN fallback so
 			// peers can still connect on the same network (e.g. localhost dev).
 			creds = cfturn.CredentialsResponse{
