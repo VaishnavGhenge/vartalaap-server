@@ -2,7 +2,9 @@ package main
 
 import (
 	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -14,6 +16,10 @@ import (
 )
 
 func main() {
+	// Structured JSON logs so platforms like Fly/Railway/Datadog/Loki can
+	// parse and index fields without custom parsing rules.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	cfg := config.Load()
 
 	if cfg.SentryDSN != "" {

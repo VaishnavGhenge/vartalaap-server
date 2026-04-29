@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -106,6 +107,35 @@ func (c *Client) handle(env *Envelope) {
 		c.hub.forwardSignal(c, env)
 	case MsgPing:
 		c.sendJSON(&Envelope{Type: MsgPong})
+	case MsgStatsReport:
+		var rd StatsReportData
+		if len(env.Data) > 0 {
+			_ = json.Unmarshal(env.Data, &rd)
+		}
+		c.mu.RLock()
+		name := c.name
+		room := c.room
+		c.mu.RUnlock()
+		args := []any{
+			"room", room,
+			"peer_id", c.id,
+			"peer_name", name,
+		}
+		for _, p := range rd.Peers {
+			args = append(args,
+				slog.Group("peer_"+p.PeerID,
+					"remote_id", p.PeerID,
+					"quality", p.Quality,
+					"rtt_ms", p.RoundTripTimeMs,
+					"loss_pct", p.PacketLossPercent,
+					"out_kbps", p.OutboundBitrateKbps,
+					"in_kbps", p.InboundBitrateKbps,
+					"candidate", p.CandidateType,
+					"jitter_ms", p.JitterMs,
+				),
+			)
+		}
+		slog.Info("stats_report", args...)
 	default:
 		c.sendError("unknown message type: " + string(env.Type))
 	}
