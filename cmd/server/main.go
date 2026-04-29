@@ -9,9 +9,11 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	sentryhttp "github.com/getsentry/sentry-go/http"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfturn"
 	"github.com/vaishnavghenge/vartalaap-server/internal/config"
 	"github.com/vaishnavghenge/vartalaap-server/internal/httpx"
+	_ "github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 	"github.com/vaishnavghenge/vartalaap-server/internal/signaling"
 )
 
@@ -34,6 +36,15 @@ func main() {
 		}
 	}
 
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		ms := &http.Server{Addr: "127.0.0.1:9091", Handler: mux}
+		if err := ms.ListenAndServe(); err != nil {
+			log.Printf("metrics server: %v", err)
+		}
+	}()
+
 	hub := signaling.NewHub()
 	cf := cfturn.New(cfg.CFTurnKeyID, cfg.CFTurnAPIToken)
 
@@ -48,7 +59,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           sentinel.Handle(mux),
+		Handler:           httpx.LogMiddleware(sentinel.Handle(mux)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Printf("vartalaap-server listening on :%s", cfg.Port)

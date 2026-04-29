@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 )
 
 type Client struct {
@@ -58,7 +59,14 @@ func (c *Client) writePump(ctx context.Context) {
 }
 
 func (c *Client) readPump(ctx context.Context) {
-	defer c.hub.leaveAll(c)
+	metrics.ActivePeers.Inc()
+	slog.Info("ws_connect", "peer_id", c.id)
+	defer func() {
+		metrics.ActivePeers.Dec()
+		room := c.room
+		c.hub.leaveAll(c)
+		slog.Info("ws_disconnect", "peer_id", c.id, "room", room)
+	}()
 	for {
 		_, data, err := c.conn.Read(ctx)
 		if err != nil {
@@ -89,14 +97,18 @@ func (c *Client) handle(env *Envelope) {
 		c.audio = jd.Audio
 		c.video = jd.Video
 		c.mu.Unlock()
+		metrics.JoinsTotal.Inc()
+		slog.Info("ws_msg", "type", "join", "peer_id", c.id, "room", env.Room, "name", jd.Name, "audio", jd.Audio, "video", jd.Video)
 		c.hub.join(c, env.Room)
 	case MsgLeave:
+		slog.Info("ws_msg", "type", "leave", "peer_id", c.id, "room", c.room)
 		c.hub.leaveAll(c)
 	case MsgPeerState:
 		var st PeerStateData
 		if len(env.Data) > 0 {
 			_ = json.Unmarshal(env.Data, &st)
 		}
+		slog.Info("ws_msg", "type", "peer-state", "peer_id", c.id, "room", c.room, "audio", st.Audio, "video", st.Video, "speaking", st.Speaking)
 		c.setState(st.Audio, st.Video)
 		c.hub.broadcastState(c, st)
 	case MsgSignal:
@@ -104,6 +116,9 @@ func (c *Client) handle(env *Envelope) {
 			c.sendError("signal requires 'to'")
 			return
 		}
+		st := signalSubtype(env.Data)
+		metrics.SignalsTotal.WithLabelValues(st).Inc()
+		slog.Info("ws_msg", "type", "signal", "peer_id", c.id, "room", c.room, "to", env.To, "signal_type", st)
 		c.hub.forwardSignal(c, env)
 	case MsgPing:
 		c.sendJSON(&Envelope{Type: MsgPong})
@@ -156,4 +171,21 @@ func (c *Client) sendJSON(env *Envelope) {
 func (c *Client) sendError(msg string) {
 	data, _ := json.Marshal(ErrorData{Message: msg})
 	c.sendJSON(&Envelope{Type: MsgError, Data: data})
+}
+
+func signalSubtype(data json.RawMessage) string {
+	var v struct {
+		Type      string          `json:"type"`
+		Candidate json.RawMessage `json:"candidate"`
+	}
+	if len(data) == 0 || json.Unmarshal(data, &v) != nil {
+		return "unknown"
+	}
+	if v.Type != "" {
+		return v.Type // "offer" or "answer"
+	}
+	if len(v.Candidate) > 0 {
+		return "candidate"
+	}
+	return "unknown"
 }

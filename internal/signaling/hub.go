@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sync"
+
+	"github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 )
 
 type Hub struct {
@@ -28,6 +30,7 @@ func (h *Hub) join(c *Client, roomID string) {
 	if !ok {
 		room = newRoom(roomID)
 		h.rooms[roomID] = room
+		metrics.ActiveRooms.Inc()
 	}
 	existing := room.peerInfos()
 	room.add(c)
@@ -104,6 +107,7 @@ func (h *Hub) forwardSignal(from *Client, env *Envelope) {
 func (h *Hub) gcLocked(r *Room) {
 	if r.empty() {
 		delete(h.rooms, r.id)
+		metrics.ActiveRooms.Dec()
 	}
 }
 
