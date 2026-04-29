@@ -5,17 +5,19 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/vaishnavghenge/vartalaap-server/internal/quality"
 )
 
 type Snapshot struct {
-	ActivePeers      float64 `json:"active_peers"`
-	ActiveRooms      float64 `json:"active_rooms"`
-	JoinsTotal       float64 `json:"joins_total"`
-	IceRequestsTotal float64 `json:"ice_requests_total"`
-	IceErrorsTotal   float64 `json:"ice_errors_total"`
-	SignalsOffer     float64 `json:"signals_offer"`
-	SignalsAnswer    float64 `json:"signals_answer"`
-	SignalsCandidate float64 `json:"signals_candidate"`
+	ActivePeers      float64          `json:"active_peers"`
+	ActiveRooms      float64          `json:"active_rooms"`
+	JoinsTotal       float64          `json:"joins_total"`
+	IceRequestsTotal float64          `json:"ice_requests_total"`
+	IceErrorsTotal   float64          `json:"ice_errors_total"`
+	SignalsOffer     float64          `json:"signals_offer"`
+	SignalsAnswer    float64          `json:"signals_answer"`
+	SignalsCandidate float64          `json:"signals_candidate"`
+	Quality          quality.Aggregate `json:"quality"`
 }
 
 func Gather() Snapshot {
@@ -48,5 +50,6 @@ func Gather() Snapshot {
 		SignalsOffer:     raw["vartalaap_signals_total:offer"],
 		SignalsAnswer:    raw["vartalaap_signals_total:answer"],
 		SignalsCandidate: raw["vartalaap_signals_total:candidate"],
+		Quality:          quality.Default.Aggregate(),
 	}
 }

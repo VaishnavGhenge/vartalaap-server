@@ -10,6 +10,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/vaishnavghenge/vartalaap-server/internal/metrics"
+	"github.com/vaishnavghenge/vartalaap-server/internal/quality"
 )
 
 type Client struct {
@@ -65,6 +66,7 @@ func (c *Client) readPump(ctx context.Context) {
 		metrics.ActivePeers.Dec()
 		room := c.room
 		c.hub.leaveAll(c)
+		quality.Default.Delete(c.id)
 		slog.Info("ws_disconnect", "peer_id", c.id, "room", room)
 	}()
 	for {
@@ -137,6 +139,17 @@ func (c *Client) handle(env *Envelope) {
 			"peer_name", name,
 		}
 		for _, p := range rd.Peers {
+			quality.Default.Set(quality.PeerReport{
+				PeerID:              c.id,
+				Room:                room,
+				Quality:             string(p.Quality),
+				RoundTripTimeMs:     p.RoundTripTimeMs,
+				PacketLossPercent:   p.PacketLossPercent,
+				OutboundBitrateKbps: int(p.OutboundBitrateKbps),
+				InboundBitrateKbps:  int(p.InboundBitrateKbps),
+				CandidateType:       string(p.CandidateType),
+				JitterMs:            p.JitterMs,
+			})
 			args = append(args,
 				slog.Group("peer_"+p.PeerID,
 					"remote_id", p.PeerID,

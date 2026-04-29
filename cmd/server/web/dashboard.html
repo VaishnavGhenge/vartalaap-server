@@ -191,6 +191,40 @@ body {
   </div>
 </div>
 
+<div class="section-label">Call Quality <span id="quality-age" style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted);font-size:10px;margin-left:6px"></span></div>
+<div class="stat-grid" style="margin-bottom:28px">
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" style="background:var(--green)"></div>Good</div>
+    <div class="value" id="q-good">—</div>
+    <div class="sub">peers</div>
+  </div>
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" style="background:var(--amber)"></div>Fair</div>
+    <div class="value" id="q-medium">—</div>
+    <div class="sub">peers</div>
+  </div>
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" style="background:var(--red)"></div>Poor</div>
+    <div class="value" id="q-poor">—</div>
+    <div class="sub">peers</div>
+  </div>
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" style="background:var(--purple)"></div>Via TURN</div>
+    <div class="value" id="q-relay">—</div>
+    <div class="sub">relayed</div>
+  </div>
+</div>
+<div class="chart-grid" style="margin-bottom:28px">
+  <div class="chart-card">
+    <div class="chart-title">Avg RTT (ms)</div>
+    <div class="chart-wrap"><canvas id="c-rtt"></canvas></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-title">Avg Packet Loss (%)</div>
+    <div class="chart-wrap"><canvas id="c-loss"></canvas></div>
+  </div>
+</div>
+
 <div class="section-label">Activity</div>
 <div class="chart-grid">
   <div class="chart-card">
@@ -272,6 +306,8 @@ const charts = {
     ds('answer', '#4ade80'),
     ds('candidate', '#fbbf24'),
   ]),
+  rtt:  makeChart('c-rtt',  [ds('rtt ms',  '#a78bfa')]),
+  loss: makeChart('c-loss', [ds('loss %',  '#f87171')]),
 };
 
 // ── state ─────────────────────────────────────
@@ -279,6 +315,7 @@ const history = {
   labels: [],
   peers: [], rooms: [],
   offer: [], answer: [], candidate: [],
+  rtt: [], loss: [],
 };
 let prevSignals = null;
 
@@ -318,6 +355,17 @@ async function poll() {
     document.getElementById('s-ice-sub').textContent =
       iceErr > 0 ? `${iceErr} errors` : 'TURN credentials';
 
+    // Quality stats
+    const q = d.quality || {};
+    set('q-good',   q.peers_good   ?? 0);
+    set('q-medium', q.peers_medium ?? 0);
+    set('q-poor',   q.peers_poor   ?? 0);
+    set('q-relay',  q.relay_count  ?? 0);
+
+    const totalQ = (q.peers_good || 0) + (q.peers_medium || 0) + (q.peers_poor || 0);
+    const ageEl = document.getElementById('quality-age');
+    ageEl.textContent = totalQ > 0 ? `${totalQ} reporting` : 'waiting for reports…';
+
     // Signal rate (delta since last poll)
     const offer     = delta('signals_offer',     d.signals_offer);
     const answer    = delta('signals_answer',    d.signals_answer);
@@ -329,9 +377,13 @@ async function poll() {
     push('offer', offer);
     push('answer', answer);
     push('candidate', candidate);
+    push('rtt',  q.avg_rtt_ms  ?? 0);
+    push('loss', q.avg_loss_pct ?? 0);
 
     applyHistory(charts.presence, 'labels', ['peers', 'rooms']);
     applyHistory(charts.signals,  'labels', ['offer', 'answer', 'candidate']);
+    applyHistory(charts.rtt,      'labels', ['rtt']);
+    applyHistory(charts.loss,     'labels', ['loss']);
 
     // Status
     const pulse = document.getElementById('pulse');
