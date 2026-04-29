@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vartalaap</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0c0e14;
+  --surface:  #13161f;
+  --border:   #1f2535;
+  --muted:    #3d4d6b;
+  --dim:      #64748b;
+  --text:     #cbd5e1;
+  --bright:   #f1f5f9;
+  --teal:     #2dd4bf;
+  --blue:     #60a5fa;
+  --purple:   #a78bfa;
+  --green:    #4ade80;
+  --amber:    #fbbf24;
+  --red:      #f87171;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 28px 24px 48px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+/* ── header ─────────────────────────────────── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 32px;
+}
+.header-left { display: flex; align-items: center; gap: 10px; }
+.logo {
+  width: 28px; height: 28px;
+  background: linear-gradient(135deg, var(--teal), var(--blue));
+  border-radius: 7px;
+}
+.header h1 { font-size: 15px; font-weight: 600; color: var(--bright); letter-spacing: 0.01em; }
+.pulse-wrap { display: flex; align-items: center; gap: 7px; }
+.pulse {
+  position: relative; width: 8px; height: 8px;
+}
+.pulse-dot, .pulse-ring {
+  position: absolute; inset: 0;
+  border-radius: 50%;
+  background: var(--green);
+}
+.pulse-ring {
+  background: transparent;
+  border: 1px solid var(--green);
+  animation: ping 2s ease-out infinite;
+}
+@keyframes ping {
+  0%   { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+.pulse.err .pulse-dot, .pulse.err .pulse-ring { background: var(--red); border-color: var(--red); }
+.status-text { font-size: 11px; color: var(--dim); }
+
+/* ── section labels ──────────────────────────── */
+.section-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+
+/* ── stat cards ──────────────────────────────── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 28px;
+}
+@media (max-width: 700px) { .stat-grid { grid-template-columns: repeat(2, 1fr); } }
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.stat-card .label {
+  font-size: 11px; color: var(--dim);
+  margin-bottom: 6px;
+  display: flex; align-items: center; gap: 5px;
+}
+.stat-card .label-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  flex-shrink: 0;
+}
+.stat-card .value {
+  font-size: 32px; font-weight: 700;
+  color: var(--bright); line-height: 1;
+  letter-spacing: -0.02em;
+}
+.stat-card .sub {
+  font-size: 11px; color: var(--muted);
+  margin-top: 4px;
+}
+
+/* ── chart grid ──────────────────────────────── */
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-bottom: 28px;
+}
+@media (max-width: 700px) { .chart-grid { grid-template-columns: 1fr; } }
+
+.chart-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 16px 12px;
+}
+.chart-card .chart-title {
+  font-size: 11px; color: var(--dim);
+  margin-bottom: 10px;
+  display: flex; align-items: center; gap: 6px;
+}
+.chart-wrap { position: relative; height: 100px; }
+
+/* ── ice error banner ────────────────────────── */
+.alert {
+  display: none;
+  background: #2a1a1a;
+  border: 1px solid #7f1d1d;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--red);
+  margin-bottom: 20px;
+}
+.alert.visible { display: block; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <div class="logo"></div>
+    <h1>Vartalaap</h1>
+  </div>
+  <div class="pulse-wrap">
+    <div class="pulse" id="pulse"><div class="pulse-dot"></div><div class="pulse-ring"></div></div>
+    <span class="status-text" id="status">connecting…</span>
+  </div>
+</div>
+
+<div class="alert" id="ice-alert">
+  TURN server errors detected — peers on different networks may fail to connect.
+</div>
+
+<div class="section-label">Live</div>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" style="background:var(--teal)"></div>Peers Online</div>
+    <div class="value" id="s-peers">—</div>
+    <div class="sub">connected right now</div>
+  </div>
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" style="background:var(--purple)"></div>Active Rooms</div>
+    <div class="value" id="s-rooms">—</div>
+    <div class="sub">calls in progress</div>
+  </div>
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" style="background:var(--blue)"></div>Total Joins</div>
+    <div class="value" id="s-joins">—</div>
+    <div class="sub">since last restart</div>
+  </div>
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" style="background:var(--amber)"></div>ICE Requests</div>
+    <div class="value" id="s-ice">—</div>
+    <div class="sub" id="s-ice-sub">TURN credentials</div>
+  </div>
+</div>
+
+<div class="section-label">Activity</div>
+<div class="chart-grid">
+  <div class="chart-card">
+    <div class="chart-title">Peers &amp; Rooms</div>
+    <div class="chart-wrap"><canvas id="c-presence"></canvas></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-title">WebRTC Signals</div>
+    <div class="chart-wrap"><canvas id="c-signals"></canvas></div>
+  </div>
+</div>
+
+<script>
+const POLL_MS = 3000;
+const MAX_PTS = 60; // 3 min of history
+
+// ── chart helpers ─────────────────────────────
+
+const chartDefaults = {
+  animation: false,
+  responsive: true,
+  maintainAspectRatio: false,
+  interaction: { mode: 'index', intersect: false },
+  plugins: {
+    legend: {
+      display: true,
+      labels: { color: '#64748b', font: { size: 10 }, boxWidth: 8, padding: 10, usePointStyle: true },
+    },
+    tooltip: {
+      backgroundColor: '#1f2535',
+      titleColor: '#94a3b8',
+      bodyColor: '#e2e8f0',
+      borderColor: '#2d3a52',
+      borderWidth: 1,
+      padding: 8,
+    },
+  },
+  scales: {
+    x: {
+      ticks: { color: '#3d4d6b', font: { size: 9 }, maxTicksLimit: 5, maxRotation: 0 },
+      grid: { color: '#13161f' },
+    },
+    y: {
+      min: 0,
+      ticks: { color: '#3d4d6b', font: { size: 9 }, maxTicksLimit: 4, precision: 0 },
+      grid: { color: '#1a1f2e' },
+    },
+  },
+};
+
+function ds(label, color, data = []) {
+  return {
+    label,
+    data,
+    borderColor: color,
+    backgroundColor: color + '15',
+    borderWidth: 1.5,
+    pointRadius: 0,
+    fill: true,
+    tension: 0.4,
+  };
+}
+
+function makeChart(id, datasets) {
+  return new Chart(document.getElementById(id), {
+    type: 'line',
+    data: { labels: [], datasets },
+    options: chartDefaults,
+  });
+}
+
+const charts = {
+  presence: makeChart('c-presence', [
+    ds('peers', '#2dd4bf'),
+    ds('rooms', '#a78bfa'),
+  ]),
+  signals: makeChart('c-signals', [
+    ds('offer', '#60a5fa'),
+    ds('answer', '#4ade80'),
+    ds('candidate', '#fbbf24'),
+  ]),
+};
+
+// ── state ─────────────────────────────────────
+const history = {
+  labels: [],
+  peers: [], rooms: [],
+  offer: [], answer: [], candidate: [],
+};
+let prevSignals = null;
+
+function push(key, val) {
+  history[key].push(val);
+  if (history[key].length > MAX_PTS) history[key].shift();
+}
+
+function tick() {
+  const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  history.labels.push(now);
+  if (history.labels.length > MAX_PTS) history.labels.shift();
+}
+
+function applyHistory(chart, labelKey, seriesKeys) {
+  chart.data.labels = [...history.labels];
+  seriesKeys.forEach((k, i) => { chart.data.datasets[i].data = [...history[k]]; });
+  chart.update('none');
+}
+
+// ── polling ───────────────────────────────────
+async function poll() {
+  try {
+    const r = await fetch('/stats');
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+
+    // Stat cards
+    set('s-peers', d.active_peers);
+    set('s-rooms', d.active_rooms);
+    set('s-joins', d.joins_total);
+    set('s-ice', d.ice_requests_total);
+
+    // ICE error alert
+    const iceErr = d.ice_errors_total || 0;
+    document.getElementById('ice-alert').classList.toggle('visible', iceErr > 0);
+    document.getElementById('s-ice-sub').textContent =
+      iceErr > 0 ? `${iceErr} errors` : 'TURN credentials';
+
+    // Signal rate (delta since last poll)
+    const offer     = delta('signals_offer',     d.signals_offer);
+    const answer    = delta('signals_answer',    d.signals_answer);
+    const candidate = delta('signals_candidate', d.signals_candidate);
+
+    tick();
+    push('peers', d.active_peers);
+    push('rooms', d.active_rooms);
+    push('offer', offer);
+    push('answer', answer);
+    push('candidate', candidate);
+
+    applyHistory(charts.presence, 'labels', ['peers', 'rooms']);
+    applyHistory(charts.signals,  'labels', ['offer', 'answer', 'candidate']);
+
+    // Status
+    const pulse = document.getElementById('pulse');
+    pulse.classList.remove('err');
+    document.getElementById('status').textContent = 'live · ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('pulse').classList.add('err');
+    document.getElementById('status').textContent = 'offline';
+  }
+}
+
+function set(id, val) {
+  document.getElementById(id).textContent = val != null ? Math.round(val) : '—';
+}
+
+const prev = {};
+function delta(key, val) {
+  const d = prev[key] != null ? Math.max(0, val - prev[key]) : 0;
+  prev[key] = val;
+  return d;
+}
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

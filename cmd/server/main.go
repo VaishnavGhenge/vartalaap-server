@@ -1,6 +1,7 @@
 package main
 
 import (
+	"embed"
 	"log"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,9 @@ import (
 	_ "github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 	"github.com/vaishnavghenge/vartalaap-server/internal/signaling"
 )
+
+//go:embed web/dashboard.html
+var dashboardHTML embed.FS
 
 func main() {
 	// Structured JSON logs so platforms like Fly/Railway/Datadog/Loki can
@@ -51,6 +55,12 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/stats", httpx.NewStatsHandler())
+	mux.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := dashboardHTML.ReadFile("web/dashboard.html")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(b)
 	})
 	mux.HandleFunc("/ws", signaling.NewHandler(hub, cfg.AllowedOrigins))
 	mux.HandleFunc("/ice-servers", httpx.NewIceHandler(cf, cfg.AllowedOrigins))

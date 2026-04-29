@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vartalaap Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0f1117;
+    color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 28px;
+  }
+
+  header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: #f8fafc;
+  }
+
+  #status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #64748b;
+  }
+
+  #dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #22c55e;
+    box-shadow: 0 0 6px #22c55e;
+    transition: background 0.3s;
+  }
+
+  #dot.stale { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+
+  section {
+    margin-bottom: 32px;
+  }
+
+  section h2 {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #475569;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #1e293b;
+  }
+
+  .grid {
+    display: grid;
+    gap: 16px;
+  }
+
+  .grid-2 { grid-template-columns: repeat(2, 1fr); }
+  .grid-3 { grid-template-columns: repeat(3, 1fr); }
+  .grid-4 { grid-template-columns: repeat(4, 1fr); }
+
+  @media (max-width: 900px) {
+    .grid-4 { grid-template-columns: repeat(2, 1fr); }
+    .grid-3 { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  @media (max-width: 600px) {
+    .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    background: #161b27;
+    border: 1px solid #1e293b;
+    border-radius: 10px;
+    padding: 16px 18px 12px;
+  }
+
+  .card-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: #64748b;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  .card-value {
+    font-size: 28px;
+    font-weight: 700;
+    color: #f1f5f9;
+    line-height: 1.1;
+    margin-bottom: 2px;
+  }
+
+  .card-unit {
+    font-size: 12px;
+    color: #475569;
+  }
+
+  .chart-card {
+    background: #161b27;
+    border: 1px solid #1e293b;
+    border-radius: 10px;
+    padding: 16px 18px 12px;
+  }
+
+  .chart-title {
+    font-size: 12px;
+    font-weight: 500;
+    color: #94a3b8;
+    margin-bottom: 12px;
+  }
+
+  .chart-wrap {
+    position: relative;
+    height: 110px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Vartalaap</h1>
+  <div id="status">
+    <div id="dot"></div>
+    <span id="status-text">loading…</span>
+  </div>
+</header>
+
+<!-- Live call metrics -->
+<section>
+  <h2>Active Now</h2>
+  <div class="grid grid-4">
+    <div class="card">
+      <div class="card-label">Peers Online</div>
+      <div class="card-value" id="v-peers">—</div>
+      <div class="card-unit">connected</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Active Rooms</div>
+      <div class="card-value" id="v-rooms">—</div>
+      <div class="card-unit">rooms</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Total Joins</div>
+      <div class="card-value" id="v-joins">—</div>
+      <div class="card-unit">since restart</div>
+    </div>
+    <div class="card">
+      <div class="card-label">ICE Errors</div>
+      <div class="card-value" id="v-ice-err">—</div>
+      <div class="card-unit">TURN failures</div>
+    </div>
+  </div>
+</section>
+
+<!-- Call charts -->
+<section>
+  <h2>Call Activity</h2>
+  <div class="grid grid-2">
+    <div class="chart-card">
+      <div class="chart-title">Peers &amp; Rooms</div>
+      <div class="chart-wrap"><canvas id="chart-peers"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Joins / min</div>
+      <div class="chart-wrap"><canvas id="chart-joins"></canvas></div>
+    </div>
+  </div>
+</section>
+
+<!-- System charts -->
+<section>
+  <h2>System</h2>
+  <div class="grid grid-2">
+    <div class="chart-card">
+      <div class="chart-title">CPU %</div>
+      <div class="chart-wrap"><canvas id="chart-cpu"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">RAM Used</div>
+      <div class="chart-wrap"><canvas id="chart-ram"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Network (kb/s)</div>
+      <div class="chart-wrap"><canvas id="chart-net"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Disk I/O (kb/s)</div>
+      <div class="chart-wrap"><canvas id="chart-io"></canvas></div>
+    </div>
+  </div>
+</section>
+
+<script>
+const BASE = '/netdata/api/v1';
+const POINTS = 60;
+const INTERVAL_MS = 5000;
+
+const COLORS = {
+  teal:   '#2dd4bf',
+  blue:   '#60a5fa',
+  purple: '#a78bfa',
+  red:    '#f87171',
+  amber:  '#fbbf24',
+  green:  '#4ade80',
+  slate:  '#94a3b8',
+};
+
+function lineDataset(label, color, data) {
+  return {
+    label,
+    data,
+    borderColor: color,
+    backgroundColor: color + '18',
+    borderWidth: 1.5,
+    pointRadius: 0,
+    fill: true,
+    tension: 0.3,
+  };
+}
+
+function makeChart(id, datasets, yLabel) {
+  const ctx = document.getElementById(id).getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets },
+    options: {
+      animation: false,
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: datasets.length > 1,
+          labels: { color: '#64748b', font: { size: 10 }, boxWidth: 10, padding: 8 },
+        },
+        tooltip: {
+          backgroundColor: '#1e293b',
+          titleColor: '#94a3b8',
+          bodyColor: '#e2e8f0',
+          borderColor: '#334155',
+          borderWidth: 1,
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: '#475569', font: { size: 9 }, maxTicksLimit: 6, maxRotation: 0 },
+          grid: { color: '#1e293b' },
+        },
+        y: {
+          ticks: { color: '#475569', font: { size: 9 }, maxTicksLimit: 4 },
+          grid: { color: '#1e293b' },
+          title: yLabel
+            ? { display: true, text: yLabel, color: '#475569', font: { size: 9 } }
+            : undefined,
+          min: 0,
+        },
+      },
+    },
+  });
+}
+
+async function fetchChart(chart, after, points) {
+  const r = await fetch(`${BASE}/data?chart=${encodeURIComponent(chart)}&after=${after}&points=${points}&format=json`);
+  if (!r.ok) return null;
+  return r.json();
+}
+
+function ts(unix) {
+  return new Date(unix * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function updateChart(chart, labels, datasets) {
+  chart.data.labels = labels;
+  chart.data.datasets.forEach((ds, i) => { ds.data = datasets[i] || []; });
+  chart.update('none');
+}
+
+// Build charts
+const charts = {
+  peers: makeChart('chart-peers', [
+    lineDataset('peers', COLORS.teal, []),
+    lineDataset('rooms', COLORS.purple, []),
+  ]),
+  joins: makeChart('chart-joins', [
+    lineDataset('joins', COLORS.green, []),
+  ]),
+  cpu: makeChart('chart-cpu', [
+    lineDataset('user', COLORS.blue, []),
+    lineDataset('system', COLORS.teal, []),
+  ]),
+  ram: makeChart('chart-ram', [
+    lineDataset('used MB', COLORS.amber, []),
+  ]),
+  net: makeChart('chart-net', [
+    lineDataset('received', COLORS.teal, []),
+    lineDataset('sent', COLORS.blue, []),
+  ]),
+  io: makeChart('chart-io', [
+    lineDataset('read', COLORS.green, []),
+    lineDataset('write', COLORS.red, []),
+  ]),
+};
+
+function stat(id, value, decimals = 0) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value != null ? Number(value).toFixed(decimals) : '—';
+}
+
+async function refresh() {
+  try {
+    const [peers, rooms, joins, iceErr, cpu, ram, net, io] = await Promise.all([
+      fetchChart('prometheus_vartalaap.vartalaap_active_peers',  -POINTS * 5, POINTS),
+      fetchChart('prometheus_vartalaap.vartalaap_active_rooms',  -POINTS * 5, POINTS),
+      fetchChart('prometheus_vartalaap.vartalaap_joins_total',   -POINTS * 5, POINTS),
+      fetchChart('prometheus_vartalaap.vartalaap_ice_errors_total', -10, 1),
+      fetchChart('system.cpu',   -POINTS * 5, POINTS),
+      fetchChart('system.ram',   -POINTS * 5, POINTS),
+      fetchChart('system.net',   -POINTS * 5, POINTS),
+      fetchChart('system.io',    -POINTS * 5, POINTS),
+    ]);
+
+    // Stat cards
+    if (peers?.data?.length) stat('v-peers', peers.data[peers.data.length - 1][1]);
+    if (rooms?.data?.length) stat('v-rooms', rooms.data[rooms.data.length - 1][1]);
+    if (joins?.data?.length) stat('v-joins', joins.data[joins.data.length - 1][1]);
+    if (iceErr?.data?.length) stat('v-ice-err', iceErr.data[iceErr.data.length - 1][1]);
+
+    // Peers+rooms chart
+    if (peers?.data && rooms?.data) {
+      const labels = peers.data.map(r => ts(r[0]));
+      updateChart(charts.peers, labels, [
+        peers.data.map(r => r[1]),
+        rooms.data.map(r => r[1]),
+      ]);
+    }
+
+    // Joins chart
+    if (joins?.data) {
+      const labels = joins.data.map(r => ts(r[0]));
+      updateChart(charts.joins, labels, [joins.data.map(r => r[1])]);
+    }
+
+    // CPU chart — user + system columns
+    if (cpu?.data && cpu?.labels) {
+      const labels = cpu.data.map(r => ts(r[0]));
+      const ui = cpu.labels.indexOf('user');
+      const si = cpu.labels.indexOf('system');
+      updateChart(charts.cpu, labels, [
+        cpu.data.map(r => ui >= 0 ? r[ui] : 0),
+        cpu.data.map(r => si >= 0 ? r[si] : 0),
+      ]);
+    }
+
+    // RAM chart — used MB
+    if (ram?.data && ram?.labels) {
+      const labels = ram.data.map(r => ts(r[0]));
+      const ui = ram.labels.indexOf('used');
+      updateChart(charts.ram, labels, [
+        ram.data.map(r => ui >= 0 ? Math.round(r[ui] / 1024) : 0),
+      ]);
+    }
+
+    // Network chart — received + sent kb/s
+    if (net?.data && net?.labels) {
+      const labels = net.data.map(r => ts(r[0]));
+      const ri = net.labels.indexOf('received');
+      const si = net.labels.indexOf('sent');
+      updateChart(charts.net, labels, [
+        net.data.map(r => ri >= 0 ? Math.abs(r[ri]) / 1024 : 0),
+        net.data.map(r => si >= 0 ? Math.abs(r[si]) / 1024 : 0),
+      ]);
+    }
+
+    // Disk I/O chart
+    if (io?.data && io?.labels) {
+      const labels = io.data.map(r => ts(r[0]));
+      const ri = io.labels.indexOf('read');
+      const wi = io.labels.indexOf('write');
+      updateChart(charts.io, labels, [
+        io.data.map(r => ri >= 0 ? Math.abs(r[ri]) / 1024 : 0),
+        io.data.map(r => wi >= 0 ? Math.abs(r[wi]) / 1024 : 0),
+      ]);
+    }
+
+    document.getElementById('dot').classList.remove('stale');
+    document.getElementById('status-text').textContent = 'live · ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('dot').classList.add('stale');
+    document.getElementById('status-text').textContent = 'error: ' + e.message;
+  }
+}
+
+refresh();
+setInterval(refresh, INTERVAL_MS);
+</script>
+</body>
+</html>
