@@ -28,10 +28,11 @@ type Envelope struct {
 }
 
 type PeerInfo struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Audio bool   `json:"audio"`
-	Video bool   `json:"video"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Audio         bool   `json:"audio"`
+	Video         bool   `json:"video"`
+	ScreenSharing bool   `json:"screenSharing"`
 }
 
 type JoinData struct {
@@ -45,10 +46,11 @@ type JoinedData struct {
 }
 
 type PeerJoinedData struct {
-	PeerID string `json:"peerId"`
-	Name   string `json:"name"`
-	Audio  bool   `json:"audio"`
-	Video  bool   `json:"video"`
+	PeerID        string `json:"peerId"`
+	Name          string `json:"name"`
+	Audio         bool   `json:"audio"`
+	Video         bool   `json:"video"`
+	ScreenSharing bool   `json:"screenSharing"`
 }
 
 type PeerLeftData struct {
@@ -56,9 +58,10 @@ type PeerLeftData struct {
 }
 
 type PeerStateData struct {
-	Audio    bool `json:"audio"`
-	Video    bool `json:"video"`
-	Speaking bool `json:"speaking"`
+	Audio         bool `json:"audio"`
+	Video         bool `json:"video"`
+	Speaking      bool `json:"speaking"`
+	ScreenSharing bool `json:"screenSharing"`
 }
 
 type ErrorData struct {
@@ -66,17 +69,17 @@ type ErrorData struct {
 }
 
 type StatsReportPeer struct {
-	PeerID               string  `json:"peerId"`
-	Quality              string  `json:"quality"`
-	RoundTripTimeMs      float64 `json:"roundTripTimeMs"`
-	PacketLossPercent    float64 `json:"packetLossPercent"`
-	OutboundBitrateKbps  int     `json:"outboundBitrateKbps"`
-	InboundBitrateKbps   int     `json:"inboundBitrateKbps"`
-	CandidateType        string  `json:"candidateType"`
-	JitterMs             float64 `json:"jitterMs"`
-	FrameWidth           *int    `json:"frameWidth,omitempty"`
-	FrameHeight          *int    `json:"frameHeight,omitempty"`
-	FramesPerSecond      *int    `json:"framesPerSecond,omitempty"`
+	PeerID              string  `json:"peerId"`
+	Quality             string  `json:"quality"`
+	RoundTripTimeMs     float64 `json:"roundTripTimeMs"`
+	PacketLossPercent   float64 `json:"packetLossPercent"`
+	OutboundBitrateKbps int     `json:"outboundBitrateKbps"`
+	InboundBitrateKbps  int     `json:"inboundBitrateKbps"`
+	CandidateType       string  `json:"candidateType"`
+	JitterMs            float64 `json:"jitterMs"`
+	FrameWidth          *int    `json:"frameWidth,omitempty"`
+	FrameHeight         *int    `json:"frameHeight,omitempty"`
+	FramesPerSecond     *int    `json:"framesPerSecond,omitempty"`
 }
 
 type StatsReportData struct {

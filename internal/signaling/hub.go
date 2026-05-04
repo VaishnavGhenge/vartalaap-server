@@ -42,7 +42,7 @@ func (h *Hub) join(c *Client, roomID string) {
 
 	info := c.info()
 	evt, _ := json.Marshal(PeerJoinedData{
-		PeerID: info.ID, Name: info.Name, Audio: info.Audio, Video: info.Video,
+		PeerID: info.ID, Name: info.Name, Audio: info.Audio, Video: info.Video, ScreenSharing: info.ScreenSharing,
 	})
 	payload, _ := json.Marshal(Envelope{Type: MsgPeerJoined, Room: roomID, From: c.id, Data: evt})
 	room.broadcastExcept(c.id, payload)
