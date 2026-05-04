@@ -47,15 +47,28 @@ func (r *Room) get(peerID string) *Client {
 }
 
 func (r *Room) broadcastExcept(exceptID string, payload []byte) {
+	clients := r.clientsExcept(exceptID)
+	for _, c := range clients {
+		c.enqueue(payload)
+	}
+}
+
+func (r *Room) broadcastExceptBestEffort(exceptID string, payload []byte) {
+	clients := r.clientsExcept(exceptID)
+	for _, c := range clients {
+		c.enqueueBestEffort(payload)
+	}
+}
+
+func (r *Room) clientsExcept(exceptID string) []*Client {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	clients := make([]*Client, 0, len(r.members))
 	for id, c := range r.members {
 		if id == exceptID {
 			continue
 		}
-		select {
-		case c.send <- payload:
-		default:
-		}
+		clients = append(clients, c)
 	}
+	return clients
 }

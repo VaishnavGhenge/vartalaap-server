@@ -13,6 +13,8 @@ import (
 	"github.com/vaishnavghenge/vartalaap-server/internal/quality"
 )
 
+const sendQueueTimeout = 2 * time.Second
+
 type Client struct {
 	id   string
 	conn *websocket.Conn
@@ -177,9 +179,29 @@ func (c *Client) sendJSON(env *Envelope) {
 		log.Printf("marshal: %v", err)
 		return
 	}
+	if !c.enqueue(b) {
+		slog.Warn("signaling_send_timeout", "peer_id", c.id, "type", env.Type)
+	}
+}
+
+func (c *Client) enqueue(msg []byte) bool {
+	timer := time.NewTimer(sendQueueTimeout)
+	defer timer.Stop()
+
 	select {
-	case c.send <- b:
+	case c.send <- msg:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func (c *Client) enqueueBestEffort(msg []byte) bool {
+	select {
+	case c.send <- msg:
+		return true
 	default:
+		return false
 	}
 }
 

@@ -79,7 +79,7 @@ func (h *Hub) broadcastState(c *Client, st PeerStateData) {
 	}
 	data, _ := json.Marshal(st)
 	payload, _ := json.Marshal(Envelope{Type: MsgPeerState, Room: c.room, From: c.id, Data: data})
-	room.broadcastExcept(c.id, payload)
+	room.broadcastExceptBestEffort(c.id, payload)
 }
 
 func (h *Hub) forwardSignal(from *Client, env *Envelope) {
@@ -97,9 +97,8 @@ func (h *Hub) forwardSignal(from *Client, env *Envelope) {
 	}
 	out := Envelope{Type: MsgSignal, Room: from.room, From: from.id, To: env.To, Data: env.Data}
 	b, _ := json.Marshal(out)
-	select {
-	case target.send <- b:
-	default:
+	if !target.enqueue(b) {
+		from.sendError("target peer signaling queue is full")
 	}
 }
 
