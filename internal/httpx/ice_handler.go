@@ -3,6 +3,7 @@ package httpx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"slices"
 	"time"
@@ -37,7 +38,11 @@ func NewIceHandler(cf *cfturn.Client, allowedOrigins []string) http.HandlerFunc 
 		creds, err := cf.Generate(ctx, 3600) // 1 hour
 		if err != nil {
 			metrics.IceErrorsTotal.Inc()
-			sentry.CaptureException(err)
+			// context.Canceled means the client disconnected before we responded
+			// (AbortController timeout or navigation). Not a Cloudflare failure.
+			if !errors.Is(err, context.Canceled) {
+				sentry.CaptureException(err)
+			}
 			// Cloudflare TURN unavailable — return a public STUN fallback so
 			// peers can still connect on the same network (e.g. localhost dev).
 			creds = cfturn.CredentialsResponse{
