@@ -95,6 +95,7 @@ func applyCORS(w http.ResponseWriter, r *http.Request, allowedOrigins []string, 
 		return false
 	}
 	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
 	w.Header().Set("Vary", "Origin")
 	w.Header().Set("Access-Control-Allow-Methods", methods+", OPTIONS")
 	return true

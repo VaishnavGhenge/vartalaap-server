@@ -17,6 +17,10 @@ const (
 	MsgPing        MsgType = "ping"
 	MsgPong        MsgType = "pong"
 	MsgStatsReport MsgType = "stats-report"
+	// MsgSfuTracks is broadcast by the server after a peer publishes local tracks
+	// to the Cloudflare Realtime SFU. Receivers should subscribe to the announced tracks.
+	// Sender: HTTP SFU handler. Receiver: all other peers in the room.
+	MsgSfuTracks MsgType = "sfu-tracks"
 )
 
 type Envelope struct {
@@ -91,4 +95,14 @@ type StatsReportPeer struct {
 
 type StatsReportData struct {
 	Peers []StatsReportPeer `json:"peers"`
+}
+
+type SfuTrackInfo struct {
+	TrackName string `json:"trackName"`
+	Mid       string `json:"mid,omitempty"`
+}
+
+type SfuTracksData struct {
+	SessionID string         `json:"sessionId"`
+	Tracks    []SfuTrackInfo `json:"tracks"`
 }

@@ -12,11 +12,13 @@ import (
 	"github.com/getsentry/sentry-go"
 	sentryhttp "github.com/getsentry/sentry-go/http"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/vaishnavghenge/vartalaap-server/internal/cfrealtime"
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfturn"
 	"github.com/vaishnavghenge/vartalaap-server/internal/config"
 	"github.com/vaishnavghenge/vartalaap-server/internal/db"
 	"github.com/vaishnavghenge/vartalaap-server/internal/httpx"
 	_ "github.com/vaishnavghenge/vartalaap-server/internal/metrics"
+	"github.com/vaishnavghenge/vartalaap-server/internal/sfu"
 	"github.com/vaishnavghenge/vartalaap-server/internal/signaling"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
@@ -52,6 +54,7 @@ func main() {
 
 	hub := signaling.NewHub()
 	cf := cfturn.New(cfg.CFTurnKeyID, cfg.CFTurnAPIToken)
+	sfuRegistry := sfu.NewRegistry()
 	meetLimiter := httpx.NewRateLimiter(12, 24)
 	iceLimiter := httpx.NewRateLimiter(60, 120)
 
@@ -68,6 +71,20 @@ func main() {
 	mux.HandleFunc("/ws", signaling.NewHandler(hub, cfg.AllowedOrigins))
 	mux.HandleFunc("/meets/new", httpx.NewMeetHandler(cfg.AllowedOrigins, meetLimiter))
 	mux.HandleFunc("/ice-servers", httpx.NewIceHandler(cf, cfg.AllowedOrigins, iceLimiter))
+
+	if cfg.CFCallsAppID != "" && cfg.CFCallsAppToken != "" {
+		cfCalls := cfrealtime.New(cfg.CFCallsAppID, cfg.CFCallsAppToken)
+		authCfg := httpx.AuthConfig{
+			AllowedOrigins: cfg.AllowedOrigins,
+			JWTSecret:      cfg.JWTSecret,
+			AccessTokenTTL: cfg.AccessTokenTTL,
+			SecureCookie:   cfg.SecureCookie,
+		}
+		httpx.SFUHandlers(mux, hub, sfuRegistry, cfCalls, authCfg)
+		log.Println("SFU endpoints enabled")
+	} else {
+		log.Println("WARN: SFU endpoints disabled (missing CF_CALLS_APP_ID or CF_CALLS_APP_TOKEN)")
+	}
 
 	if cfg.DatabaseURL != "" && cfg.JWTSecret != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

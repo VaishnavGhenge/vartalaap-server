@@ -141,6 +141,20 @@ func (h *Hub) forwardSignal(from *Client, env *Envelope) {
 	}
 }
 
+// BroadcastSfuTracks sends an sfu-tracks envelope to all peers in roomID except peerID.
+// Called by the HTTP SFU handler after a peer successfully publishes local tracks.
+func (h *Hub) BroadcastSfuTracks(roomID, peerID string, data SfuTracksData) {
+	h.mu.Lock()
+	room := h.rooms[roomID]
+	h.mu.Unlock()
+	if room == nil {
+		return
+	}
+	b, _ := json.Marshal(data)
+	payload, _ := json.Marshal(Envelope{Type: MsgSfuTracks, Room: roomID, From: peerID, Data: b})
+	room.broadcastExcept(peerID, payload)
+}
+
 // Must be called with h.mu held.
 func (h *Hub) gcLocked(r *Room) {
 	if r.empty() {

@@ -8,31 +8,38 @@ import (
 )
 
 type Config struct {
-	Port           string
-	AllowedOrigins []string
-	CFTurnKeyID    string
-	CFTurnAPIToken string
-	SentryDSN      string
-	DatabaseURL    string
-	JWTSecret      string
-	AccessTokenTTL time.Duration
-	SecureCookie   bool
+	Port            string
+	AllowedOrigins  []string
+	CFTurnKeyID     string
+	CFTurnAPIToken  string
+	CFCallsAppID    string
+	CFCallsAppToken string
+	SentryDSN       string
+	DatabaseURL     string
+	JWTSecret       string
+	AccessTokenTTL  time.Duration
+	SecureCookie    bool
 }
 
 func Load() Config {
 	cfg := Config{
-		Port:           getenv("PORT", "8080"),
-		AllowedOrigins: splitCSV(getenv("ALLOWED_ORIGINS", "http://localhost:3000")),
-		CFTurnKeyID:    os.Getenv("CF_TURN_KEY_ID"),
-		CFTurnAPIToken: os.Getenv("CF_TURN_API_TOKEN"),
-		SentryDSN:      os.Getenv("SENTRY_DSN"),
-		DatabaseURL:    os.Getenv("DATABASE_URL"),
-		JWTSecret:      os.Getenv("JWT_SECRET"),
-		AccessTokenTTL: parseDuration(getenv("JWT_ACCESS_TTL", "15m")),
-		SecureCookie:   os.Getenv("SECURE_COOKIE") == "true",
+		Port:            getenv("PORT", "8080"),
+		AllowedOrigins:  splitCSV(getenv("ALLOWED_ORIGINS", "http://localhost:3000")),
+		CFTurnKeyID:     os.Getenv("CF_TURN_KEY_ID"),
+		CFTurnAPIToken:  os.Getenv("CF_TURN_API_TOKEN"),
+		CFCallsAppID:    os.Getenv("CF_CALLS_APP_ID"),
+		CFCallsAppToken: os.Getenv("CF_CALLS_APP_TOKEN"),
+		SentryDSN:       os.Getenv("SENTRY_DSN"),
+		DatabaseURL:     os.Getenv("DATABASE_URL"),
+		JWTSecret:       os.Getenv("JWT_SECRET"),
+		AccessTokenTTL:  parseDuration(getenv("JWT_ACCESS_TTL", "15m")),
+		SecureCookie:    os.Getenv("SECURE_COOKIE") == "true",
 	}
 	if cfg.CFTurnKeyID == "" || cfg.CFTurnAPIToken == "" {
 		log.Println("WARN: CF_TURN_KEY_ID / CF_TURN_API_TOKEN not set — /ice-servers will fail")
+	}
+	if cfg.CFCallsAppID == "" || cfg.CFCallsAppToken == "" {
+		log.Println("WARN: CF_CALLS_APP_ID / CF_CALLS_APP_TOKEN not set — SFU endpoints will be unavailable")
 	}
 	if cfg.DatabaseURL == "" {
 		log.Println("WARN: DATABASE_URL not set — auth endpoints will be unavailable")
