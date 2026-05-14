@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"log"
 	"log/slog"
@@ -13,17 +14,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfturn"
 	"github.com/vaishnavghenge/vartalaap-server/internal/config"
+	"github.com/vaishnavghenge/vartalaap-server/internal/db"
 	"github.com/vaishnavghenge/vartalaap-server/internal/httpx"
 	_ "github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 	"github.com/vaishnavghenge/vartalaap-server/internal/signaling"
+	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
 
 //go:embed web/dashboard.html
 var dashboardHTML embed.FS
 
 func main() {
-	// Structured JSON logs so platforms like Fly/Railway/Datadog/Loki can
-	// parse and index fields without custom parsing rules.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
 	cfg := config.Load()
@@ -51,6 +52,8 @@ func main() {
 
 	hub := signaling.NewHub()
 	cf := cfturn.New(cfg.CFTurnKeyID, cfg.CFTurnAPIToken)
+	meetLimiter := httpx.NewRateLimiter(12, 24)
+	iceLimiter := httpx.NewRateLimiter(60, 120)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +66,29 @@ func main() {
 		w.Write(b)
 	})
 	mux.HandleFunc("/ws", signaling.NewHandler(hub, cfg.AllowedOrigins))
-	mux.HandleFunc("/ice-servers", httpx.NewIceHandler(cf, cfg.AllowedOrigins))
+	mux.HandleFunc("/meets/new", httpx.NewMeetHandler(cfg.AllowedOrigins, meetLimiter))
+	mux.HandleFunc("/ice-servers", httpx.NewIceHandler(cf, cfg.AllowedOrigins, iceLimiter))
+
+	if cfg.DatabaseURL != "" && cfg.JWTSecret != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		pool, err := db.Open(ctx, cfg.DatabaseURL)
+		cancel()
+		if err != nil {
+			log.Fatalf("db: %v", err)
+		}
+		defer pool.Close()
+
+		st := store.New(pool)
+		httpx.AuthHandlers(mux, st, httpx.AuthConfig{
+			AllowedOrigins: cfg.AllowedOrigins,
+			JWTSecret:      cfg.JWTSecret,
+			AccessTokenTTL: cfg.AccessTokenTTL,
+			SecureCookie:   cfg.SecureCookie,
+		})
+		log.Println("Auth endpoints enabled")
+	} else {
+		log.Println("WARN: Auth endpoints disabled (missing DATABASE_URL or JWT_SECRET)")
+	}
 
 	sentinel := sentryhttp.New(sentryhttp.Options{Repanic: true})
 

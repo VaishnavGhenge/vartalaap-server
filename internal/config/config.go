@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -12,6 +13,10 @@ type Config struct {
 	CFTurnKeyID    string
 	CFTurnAPIToken string
 	SentryDSN      string
+	DatabaseURL    string
+	JWTSecret      string
+	AccessTokenTTL time.Duration
+	SecureCookie   bool
 }
 
 func Load() Config {
@@ -21,9 +26,19 @@ func Load() Config {
 		CFTurnKeyID:    os.Getenv("CF_TURN_KEY_ID"),
 		CFTurnAPIToken: os.Getenv("CF_TURN_API_TOKEN"),
 		SentryDSN:      os.Getenv("SENTRY_DSN"),
+		DatabaseURL:    os.Getenv("DATABASE_URL"),
+		JWTSecret:      os.Getenv("JWT_SECRET"),
+		AccessTokenTTL: parseDuration(getenv("JWT_ACCESS_TTL", "15m")),
+		SecureCookie:   os.Getenv("SECURE_COOKIE") == "true",
 	}
 	if cfg.CFTurnKeyID == "" || cfg.CFTurnAPIToken == "" {
 		log.Println("WARN: CF_TURN_KEY_ID / CF_TURN_API_TOKEN not set — /ice-servers will fail")
+	}
+	if cfg.DatabaseURL == "" {
+		log.Println("WARN: DATABASE_URL not set — auth endpoints will be unavailable")
+	}
+	if cfg.JWTSecret == "" {
+		log.Println("WARN: JWT_SECRET not set — auth endpoints will be unavailable")
 	}
 	return cfg
 }
@@ -44,4 +59,12 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+func parseDuration(s string) time.Duration {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 15 * time.Minute
+	}
+	return d
 }
