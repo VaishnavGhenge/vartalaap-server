@@ -10,12 +10,13 @@ import (
 	"time"
 )
 
-const baseURL = "https://rtc.live.cloudflare.com/v1"
+const defaultBaseURL = "https://rtc.live.cloudflare.com/v1"
 
 type Client struct {
 	appID    string
 	appToken string
 	http     *http.Client
+	baseURL  string
 }
 
 func New(appID, appToken string) *Client {
@@ -23,6 +24,18 @@ func New(appID, appToken string) *Client {
 		appID:    appID,
 		appToken: appToken,
 		http:     &http.Client{Timeout: 15 * time.Second},
+		baseURL:  defaultBaseURL,
+	}
+}
+
+// NewWithBaseURL creates a Client that sends requests to baseURL instead of the
+// default Cloudflare endpoint. Intended for tests only.
+func NewWithBaseURL(appID, appToken, base string) *Client {
+	return &Client{
+		appID:    appID,
+		appToken: appToken,
+		http:     &http.Client{Timeout: 15 * time.Second},
+		baseURL:  base,
 	}
 }
 
@@ -146,7 +159,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 	if body != nil {
 		r = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, r)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, r)
 	if err != nil {
 		return nil, err
 	}

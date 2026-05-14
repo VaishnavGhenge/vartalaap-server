@@ -1,1 +1,1 @@
-env $(cat .env | xargs) go run cmd/server/main.go
+source .env && go run ./cmd/server
