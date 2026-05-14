@@ -1,1 +1,1 @@
-source .env && go run ./cmd/server
+set -a && source .env && set +a && go run ./cmd/server
