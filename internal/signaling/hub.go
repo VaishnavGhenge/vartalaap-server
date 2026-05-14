@@ -61,7 +61,7 @@ func (h *Hub) join(c *Client, roomID string) {
 
 	info := c.info()
 	evt, _ := json.Marshal(PeerJoinedData{
-		PeerID: info.ID, Name: info.Name, Audio: info.Audio, Video: info.Video, ScreenSharing: info.ScreenSharing,
+		PeerID: info.ID, Name: info.Name, Audio: info.Audio, Video: info.Video, ScreenSharing: info.ScreenSharing, VideoHeld: info.VideoHeld,
 	})
 	payload, _ := json.Marshal(Envelope{Type: MsgPeerJoined, Room: roomID, From: c.id, Data: evt})
 	room.broadcastExcept(c.id, payload)
@@ -99,6 +99,26 @@ func (h *Hub) broadcastState(c *Client, st PeerStateData) {
 	data, _ := json.Marshal(st)
 	payload, _ := json.Marshal(Envelope{Type: MsgPeerState, Room: c.room, From: c.id, Data: data})
 	room.broadcastExceptBestEffort(c.id, payload)
+}
+
+func (h *Hub) forwardState(from *Client, to string, st PeerStateData) {
+	h.mu.Lock()
+	room := h.rooms[from.room]
+	h.mu.Unlock()
+	if room == nil {
+		from.sendError("not in a room")
+		return
+	}
+	target := room.get(to)
+	if target == nil {
+		from.sendError("target peer not in room")
+		return
+	}
+	data, _ := json.Marshal(st)
+	payload, _ := json.Marshal(Envelope{Type: MsgPeerState, Room: from.room, From: from.id, To: to, Data: data})
+	if !target.enqueue(payload) {
+		from.sendError("target peer state queue is full")
+	}
 }
 
 func (h *Hub) forwardSignal(from *Client, env *Envelope) {

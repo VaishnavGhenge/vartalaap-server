@@ -33,6 +33,7 @@ type PeerInfo struct {
 	Audio         bool   `json:"audio"`
 	Video         bool   `json:"video"`
 	ScreenSharing bool   `json:"screenSharing"`
+	VideoHeld     bool   `json:"videoHeld"`
 }
 
 type JoinData struct {
@@ -52,6 +53,7 @@ type PeerJoinedData struct {
 	Audio         bool   `json:"audio"`
 	Video         bool   `json:"video"`
 	ScreenSharing bool   `json:"screenSharing"`
+	VideoHeld     bool   `json:"videoHeld"`
 }
 
 type PeerLeftData struct {
@@ -59,10 +61,11 @@ type PeerLeftData struct {
 }
 
 type PeerStateData struct {
-	Audio         bool `json:"audio"`
-	Video         bool `json:"video"`
-	Speaking      bool `json:"speaking"`
-	ScreenSharing bool `json:"screenSharing"`
+	Audio         bool  `json:"audio"`
+	Video         bool  `json:"video"`
+	Speaking      bool  `json:"speaking"`
+	ScreenSharing bool  `json:"screenSharing"`
+	VideoHeld     *bool `json:"videoHeld,omitempty"`
 }
 
 type ErrorData struct {

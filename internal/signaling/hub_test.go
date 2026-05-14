@@ -48,6 +48,10 @@ func findEnvelope(envelopes []Envelope, typ MsgType) (Envelope, bool) {
 	return Envelope{}, false
 }
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
 func TestHubJoinReplacesStalePeerWithSamePresenceID(t *testing.T) {
 	hub := NewHub()
 	oldPeer := testClient("peer-old")
@@ -112,5 +116,48 @@ func TestHubJoinReplacesStalePeerWithSamePresenceID(t *testing.T) {
 	}
 	if joinedPeerData.PeerID != "peer-new" {
 		t.Fatalf("expected peer-new to join, got %s", joinedPeerData.PeerID)
+	}
+}
+
+func TestHubForwardStateTargetsOnePeer(t *testing.T) {
+	hub := NewHub()
+	alice := testClient("peer-alice")
+	bob := testClient("peer-bob")
+	carol := testClient("peer-carol")
+	setTestClientState(alice, "Alice", "presence-alice")
+	setTestClientState(bob, "Bob", "presence-bob")
+	setTestClientState(carol, "Carol", "presence-carol")
+
+	hub.join(alice, "room-1")
+	hub.join(bob, "room-1")
+	hub.join(carol, "room-1")
+	drainEnvelopes(t, alice)
+	drainEnvelopes(t, bob)
+	drainEnvelopes(t, carol)
+
+	hub.forwardState(alice, bob.id, PeerStateData{
+		Audio: true, Video: true, VideoHeld: boolPtr(true),
+	})
+
+	bobMessages := drainEnvelopes(t, bob)
+	state, ok := findEnvelope(bobMessages, MsgPeerState)
+	if !ok {
+		t.Fatal("expected target peer to receive peer-state")
+	}
+	if state.From != alice.id || state.To != bob.id {
+		t.Fatalf("expected targeted state from %s to %s, got from=%s to=%s", alice.id, bob.id, state.From, state.To)
+	}
+	var stateData PeerStateData
+	if err := json.Unmarshal(state.Data, &stateData); err != nil {
+		t.Fatalf("unmarshal peer-state data: %v", err)
+	}
+	if stateData.VideoHeld == nil || !*stateData.VideoHeld {
+		t.Fatal("expected targeted state to carry videoHeld=true")
+	}
+	if got := drainEnvelopes(t, carol); len(got) != 0 {
+		t.Fatalf("expected non-target peer to receive no messages, got %d", len(got))
+	}
+	if alice.info().VideoHeld {
+		t.Fatal("targeted videoHeld state should not mutate sender room presence")
 	}
 }

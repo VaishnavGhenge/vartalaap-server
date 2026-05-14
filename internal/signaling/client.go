@@ -30,20 +30,24 @@ type Client struct {
 	audio         bool
 	video         bool
 	screenSharing bool
+	videoHeld     bool
 	presenceID    string
 }
 
 func (c *Client) info() PeerInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return PeerInfo{ID: c.id, Name: c.name, Audio: c.audio, Video: c.video, ScreenSharing: c.screenSharing}
+	return PeerInfo{ID: c.id, Name: c.name, Audio: c.audio, Video: c.video, ScreenSharing: c.screenSharing, VideoHeld: c.videoHeld}
 }
 
-func (c *Client) setState(audio, video bool, screenSharing bool) {
+func (c *Client) setState(audio, video bool, screenSharing bool, videoHeld *bool) {
 	c.mu.Lock()
 	c.audio = audio
 	c.video = video
 	c.screenSharing = screenSharing
+	if videoHeld != nil {
+		c.videoHeld = *videoHeld
+	}
 	c.mu.Unlock()
 }
 
@@ -121,8 +125,12 @@ func (c *Client) handle(env *Envelope) {
 		if len(env.Data) > 0 {
 			_ = json.Unmarshal(env.Data, &st)
 		}
-		slog.Info("ws_msg", "type", "peer-state", "peer_id", c.id, "room", c.room, "audio", st.Audio, "video", st.Video, "speaking", st.Speaking, "screen_sharing", st.ScreenSharing)
-		c.setState(st.Audio, st.Video, st.ScreenSharing)
+		slog.Info("ws_msg", "type", "peer-state", "peer_id", c.id, "room", c.room, "to", env.To, "audio", st.Audio, "video", st.Video, "speaking", st.Speaking, "screen_sharing", st.ScreenSharing, "video_held", st.VideoHeld)
+		if env.To != "" {
+			c.hub.forwardState(c, env.To, st)
+			return
+		}
+		c.setState(st.Audio, st.Video, st.ScreenSharing, st.VideoHeld)
 		c.hub.broadcastState(c, st)
 	case MsgSignal:
 		if env.To == "" {
