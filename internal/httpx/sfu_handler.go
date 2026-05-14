@@ -135,28 +135,28 @@ func sfuTracksNew(hub *signaling.Hub, cf *cfrealtime.Client, sessionID, roomID, 
 
 func sfuRenegotiate(cf *cfrealtime.Client, sessionID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The client sends the sessionDescription as produced by its RTCPeerConnection.
+		// For the subscribe flow this is type:"answer"; for ICE restart it may be "offer".
+		// We proxy it verbatim to CF — CF returns only a success/error, no SDP.
 		var body struct {
 			SessionDescription struct {
 				Type string `json:"type"`
 				SDP  string `json:"sdp"`
 			} `json:"sessionDescription"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SessionDescription.SDP == "" {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
+			body.SessionDescription.SDP == "" || body.SessionDescription.Type == "" {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
 
-		answerSDP, err := cf.Renegotiate(r.Context(), sessionID, body.SessionDescription.SDP)
-		if err != nil {
+		if err := cf.Renegotiate(r.Context(), sessionID, body.SessionDescription.Type, body.SessionDescription.SDP); err != nil {
 			slog.Error("sfu: renegotiate", "err", err, "session", sessionID)
 			http.Error(w, "SFU error", http.StatusBadGateway)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"sessionDescription": map[string]string{"type": "answer", "sdp": answerSDP},
-		})
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

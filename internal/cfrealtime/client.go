@@ -56,8 +56,10 @@ type renegotiateRequest struct {
 	SessionDescription SessionDescription `json:"sessionDescription"`
 }
 
+// renegotiateResponse carries only an optional error — no SDP is returned.
 type renegotiateResponse struct {
-	SessionDescription SessionDescription `json:"sessionDescription"`
+	ErrorCode        string `json:"errorCode,omitempty"`
+	ErrorDescription string `json:"errorDescription,omitempty"`
 }
 
 // CreateSession creates a new Cloudflare Realtime SFU session and returns its ID.
@@ -93,22 +95,27 @@ func (c *Client) TracksNew(ctx context.Context, sessionID string, req TracksNewR
 	return out, nil
 }
 
-// Renegotiate sends a fresh SDP offer after an ICE restart and returns the answer SDP.
-func (c *Client) Renegotiate(ctx context.Context, sessionID, offerSDP string) (string, error) {
-	req := renegotiateRequest{SessionDescription: SessionDescription{Type: "offer", SDP: offerSDP}}
+// Renegotiate sends an SDP answer (produced after a subscribe-triggered renegotiation)
+// to Cloudflare. CF returns only a success/error — no SDP is returned.
+// sdpType should be "answer" for the subscribe flow; "offer" for ICE-restart scenarios.
+func (c *Client) Renegotiate(ctx context.Context, sessionID, sdpType, sdp string) error {
+	req := renegotiateRequest{SessionDescription: SessionDescription{Type: sdpType, SDP: sdp}}
 	body, err := json.Marshal(req)
 	if err != nil {
-		return "", err
+		return err
 	}
 	b, err := c.do(ctx, http.MethodPut, fmt.Sprintf("/apps/%s/sessions/%s/renegotiate", c.appID, sessionID), body)
 	if err != nil {
-		return "", err
+		return err
 	}
 	var out renegotiateResponse
 	if err := json.Unmarshal(b, &out); err != nil {
-		return "", fmt.Errorf("cfrealtime: decode renegotiate: %w", err)
+		return fmt.Errorf("cfrealtime: decode renegotiate: %w", err)
 	}
-	return out.SessionDescription.SDP, nil
+	if out.ErrorCode != "" {
+		return fmt.Errorf("cfrealtime: renegotiate error %s: %s", out.ErrorCode, out.ErrorDescription)
+	}
+	return nil
 }
 
 // CloseTrack closes specific tracks by mid. Use this to cleanly remove
