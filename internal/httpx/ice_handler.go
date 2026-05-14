@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -13,17 +12,9 @@ import (
 	"github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 )
 
-func NewIceHandler(cf *cfturn.Client, allowedOrigins []string) http.HandlerFunc {
+func NewIceHandler(cf *cfturn.Client, allowedOrigins []string, limiter *RateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin != "" && slices.Contains(allowedOrigins, origin) {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-		}
-		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+		if !enforceAPIRequest(w, r, allowedOrigins, http.MethodPost, limiter) {
 			return
 		}
 		if r.Method != http.MethodPost {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"log/slog"
+	"regexp"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ const (
 	sendQueueTimeout = 2 * time.Second
 	readIdleTimeout  = 60 * time.Second
 )
+
+var roomIDPattern = regexp.MustCompile(`^[a-z2-9]{3}-[a-z2-9]{4}-[a-z2-9]{3}$`)
 
 type Client struct {
 	id   string
@@ -102,6 +105,10 @@ func (c *Client) handle(env *Envelope) {
 	case MsgJoin:
 		if env.Room == "" {
 			c.sendError("join requires room")
+			return
+		}
+		if !roomIDPattern.MatchString(env.Room) {
+			c.sendError("invalid room")
 			return
 		}
 		var jd JoinData
