@@ -13,7 +13,10 @@ import (
 	"github.com/vaishnavghenge/vartalaap-server/internal/quality"
 )
 
-const sendQueueTimeout = 2 * time.Second
+const (
+	sendQueueTimeout = 2 * time.Second
+	readIdleTimeout  = 60 * time.Second
+)
 
 type Client struct {
 	id   string
@@ -27,6 +30,7 @@ type Client struct {
 	audio         bool
 	video         bool
 	screenSharing bool
+	presenceID    string
 }
 
 func (c *Client) info() PeerInfo {
@@ -74,7 +78,9 @@ func (c *Client) readPump(ctx context.Context) {
 		slog.Info("ws_disconnect", "peer_id", c.id, "room", room)
 	}()
 	for {
-		_, data, err := c.conn.Read(ctx)
+		rctx, cancel := context.WithTimeout(ctx, readIdleTimeout)
+		_, data, err := c.conn.Read(rctx)
+		cancel()
 		if err != nil {
 			return
 		}
@@ -102,9 +108,10 @@ func (c *Client) handle(env *Envelope) {
 		c.name = jd.Name
 		c.audio = jd.Audio
 		c.video = jd.Video
+		c.presenceID = jd.PresenceID
 		c.mu.Unlock()
 		metrics.JoinsTotal.Inc()
-		slog.Info("ws_msg", "type", "join", "peer_id", c.id, "room", env.Room, "name", jd.Name, "audio", jd.Audio, "video", jd.Video)
+		slog.Info("ws_msg", "type", "join", "peer_id", c.id, "presence_id", jd.PresenceID, "room", env.Room, "name", jd.Name, "audio", jd.Audio, "video", jd.Video)
 		c.hub.join(c, env.Room)
 	case MsgLeave:
 		slog.Info("ws_msg", "type", "leave", "peer_id", c.id, "room", c.room)
@@ -147,23 +154,29 @@ func (c *Client) handle(env *Envelope) {
 				PeerID:              c.id,
 				Room:                room,
 				Quality:             string(p.Quality),
+				NetworkPressure:     string(p.NetworkPressure),
 				RoundTripTimeMs:     p.RoundTripTimeMs,
 				PacketLossPercent:   p.PacketLossPercent,
 				OutboundBitrateKbps: int(p.OutboundBitrateKbps),
 				InboundBitrateKbps:  int(p.InboundBitrateKbps),
 				CandidateType:       string(p.CandidateType),
 				JitterMs:            p.JitterMs,
+				EncodingLevel:       p.EncodingLevel,
+				VideoHeld:           p.VideoHeld,
 			})
 			args = append(args,
 				slog.Group("peer_"+p.PeerID,
 					"remote_id", p.PeerID,
 					"quality", p.Quality,
+					"network_pressure", p.NetworkPressure,
 					"rtt_ms", p.RoundTripTimeMs,
 					"loss_pct", p.PacketLossPercent,
 					"out_kbps", p.OutboundBitrateKbps,
 					"in_kbps", p.InboundBitrateKbps,
 					"candidate", p.CandidateType,
 					"jitter_ms", p.JitterMs,
+					"encoding_level", p.EncodingLevel,
+					"video_held", p.VideoHeld,
 				),
 			)
 		}

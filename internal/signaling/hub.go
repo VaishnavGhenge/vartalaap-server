@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"sync"
 
+	"github.com/coder/websocket"
 	"github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 )
 
@@ -19,6 +20,8 @@ func NewHub() *Hub {
 }
 
 func (h *Hub) join(c *Client, roomID string) {
+	var replaced *Client
+
 	h.mu.Lock()
 	if c.room != "" && c.room != roomID {
 		if old, ok := h.rooms[c.room]; ok {
@@ -32,10 +35,26 @@ func (h *Hub) join(c *Client, roomID string) {
 		h.rooms[roomID] = room
 		metrics.ActiveRooms.Inc()
 	}
+	c.mu.RLock()
+	presenceID := c.presenceID
+	c.mu.RUnlock()
+	replaced = room.removeByPresenceID(presenceID, c.id)
+	if replaced != nil {
+		replaced.room = ""
+	}
 	existing := room.peerInfos()
 	room.add(c)
 	c.room = roomID
 	h.mu.Unlock()
+
+	if replaced != nil {
+		evt, _ := json.Marshal(PeerLeftData{PeerID: replaced.id})
+		payload, _ := json.Marshal(Envelope{Type: MsgPeerLeft, Room: roomID, From: replaced.id, Data: evt})
+		room.broadcastExceptIDs(map[string]bool{replaced.id: true, c.id: true}, payload)
+		if replaced.conn != nil {
+			_ = replaced.conn.Close(websocket.StatusNormalClosure, "replaced by reconnect")
+		}
+	}
 
 	joinedData, _ := json.Marshal(JoinedData{Peers: existing})
 	c.sendJSON(&Envelope{Type: MsgJoined, Room: roomID, Data: joinedData})

@@ -9,12 +9,15 @@ type PeerReport struct {
 	PeerID              string
 	Room                string
 	Quality             string
+	NetworkPressure     string
 	RoundTripTimeMs     float64
 	PacketLossPercent   float64
 	OutboundBitrateKbps int
 	InboundBitrateKbps  int
 	CandidateType       string
 	JitterMs            float64
+	EncodingLevel       int
+	VideoHeld           bool
 	UpdatedAt           time.Time
 }
 
@@ -25,6 +28,7 @@ type Aggregate struct {
 	AvgRttMs    float64 `json:"avg_rtt_ms"`
 	AvgLossPct  float64 `json:"avg_loss_pct"`
 	RelayCount  int     `json:"relay_count"`
+	VideoHeld   int     `json:"video_held"`
 }
 
 type Store struct {
@@ -71,6 +75,9 @@ func (s *Store) Aggregate() Aggregate {
 		lossSum += r.PacketLossPercent
 		if r.CandidateType == "relay" {
 			agg.RelayCount++
+		}
+		if r.VideoHeld {
+			agg.VideoHeld++
 		}
 	}
 

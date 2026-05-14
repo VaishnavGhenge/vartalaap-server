@@ -36,9 +36,10 @@ type PeerInfo struct {
 }
 
 type JoinData struct {
-	Name  string `json:"name"`
-	Audio bool   `json:"audio"`
-	Video bool   `json:"video"`
+	Name       string `json:"name"`
+	Audio      bool   `json:"audio"`
+	Video      bool   `json:"video"`
+	PresenceID string `json:"presenceId,omitempty"`
 }
 
 type JoinedData struct {
@@ -71,12 +72,15 @@ type ErrorData struct {
 type StatsReportPeer struct {
 	PeerID              string  `json:"peerId"`
 	Quality             string  `json:"quality"`
+	NetworkPressure     string  `json:"networkPressure"`
 	RoundTripTimeMs     float64 `json:"roundTripTimeMs"`
 	PacketLossPercent   float64 `json:"packetLossPercent"`
 	OutboundBitrateKbps int     `json:"outboundBitrateKbps"`
 	InboundBitrateKbps  int     `json:"inboundBitrateKbps"`
 	CandidateType       string  `json:"candidateType"`
 	JitterMs            float64 `json:"jitterMs"`
+	EncodingLevel       int     `json:"encodingLevel"`
+	VideoHeld           bool    `json:"videoHeld"`
 	FrameWidth          *int    `json:"frameWidth,omitempty"`
 	FrameHeight         *int    `json:"frameHeight,omitempty"`
 	FramesPerSecond     *int    `json:"framesPerSecond,omitempty"`

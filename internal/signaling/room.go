@@ -24,6 +24,27 @@ func (r *Room) remove(peerID string) {
 	delete(r.members, peerID)
 }
 
+func (r *Room) removeByPresenceID(presenceID, exceptPeerID string) *Client {
+	if presenceID == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for peerID, c := range r.members {
+		if peerID == exceptPeerID {
+			continue
+		}
+		c.mu.RLock()
+		matches := c.presenceID == presenceID
+		c.mu.RUnlock()
+		if matches {
+			delete(r.members, peerID)
+			return c
+		}
+	}
+	return nil
+}
+
 func (r *Room) empty() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -53,6 +74,13 @@ func (r *Room) broadcastExcept(exceptID string, payload []byte) {
 	}
 }
 
+func (r *Room) broadcastExceptIDs(exceptIDs map[string]bool, payload []byte) {
+	clients := r.clientsExceptIDs(exceptIDs)
+	for _, c := range clients {
+		c.enqueue(payload)
+	}
+}
+
 func (r *Room) broadcastExceptBestEffort(exceptID string, payload []byte) {
 	clients := r.clientsExcept(exceptID)
 	for _, c := range clients {
@@ -61,11 +89,15 @@ func (r *Room) broadcastExceptBestEffort(exceptID string, payload []byte) {
 }
 
 func (r *Room) clientsExcept(exceptID string) []*Client {
+	return r.clientsExceptIDs(map[string]bool{exceptID: true})
+}
+
+func (r *Room) clientsExceptIDs(exceptIDs map[string]bool) []*Client {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	clients := make([]*Client, 0, len(r.members))
 	for id, c := range r.members {
-		if id == exceptID {
+		if exceptIDs[id] {
 			continue
 		}
 		clients = append(clients, c)
