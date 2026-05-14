@@ -111,9 +111,26 @@ func (c *Client) Renegotiate(ctx context.Context, sessionID, offerSDP string) (s
 	return out.SessionDescription.SDP, nil
 }
 
-// CloseSession terminates the Cloudflare Realtime session.
-func (c *Client) CloseSession(ctx context.Context, sessionID string) error {
-	_, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/apps/%s/sessions/%s", c.appID, sessionID), nil)
+// CloseTrack closes specific tracks by mid. Use this to cleanly remove
+// tracks from a session. Sessions themselves expire when the underlying
+// WebRTC connection closes — there is no session-level delete endpoint.
+func (c *Client) CloseTrack(ctx context.Context, sessionID string, mids []string, offerSDP string) error {
+	type trackClose struct {
+		Mid string `json:"mid"`
+	}
+	type req struct {
+		Tracks             []trackClose        `json:"tracks"`
+		SessionDescription *SessionDescription `json:"sessionDescription,omitempty"`
+	}
+	tracks := make([]trackClose, len(mids))
+	for i, m := range mids {
+		tracks[i] = trackClose{Mid: m}
+	}
+	body, err := json.Marshal(req{Tracks: tracks})
+	if err != nil {
+		return err
+	}
+	_, err = c.do(ctx, http.MethodPut, fmt.Sprintf("/apps/%s/sessions/%s/tracks/close", c.appID, sessionID), body)
 	return err
 }
 

@@ -13,7 +13,7 @@ import (
 )
 
 // SFUHandlers registers the /sfu/* proxy routes.
-// All routes require a valid JWT; Cloudflare credentials never leave the server.
+// All routes require a valid JWT — Cloudflare credentials never leave the server.
 func SFUHandlers(mux *http.ServeMux, hub *signaling.Hub, registry *sfu.Registry, cf *cfrealtime.Client, cfg AuthConfig) {
 	lim := NewRateLimiter(60, 120)
 
@@ -89,7 +89,7 @@ func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrea
 		case subPath == "renegotiate" && r.Method == http.MethodPut:
 			sfuRenegotiate(cf, sessionID)(w, r)
 		case subPath == "" && r.Method == http.MethodDelete:
-			sfuClose(registry, cf, sessionID)(w, r)
+			sfuClose(registry, sessionID)(w, r)
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
 		}
@@ -160,13 +160,12 @@ func sfuRenegotiate(cf *cfrealtime.Client, sessionID string) http.HandlerFunc {
 	}
 }
 
-func sfuClose(registry *sfu.Registry, cf *cfrealtime.Client, sessionID string) http.HandlerFunc {
+func sfuClose(registry *sfu.Registry, sessionID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Remove from registry immediately so the session cannot be reused.
+		// CF sessions expire automatically once the underlying RTCPeerConnection
+		// closes — there is no session-level delete endpoint in the Realtime API.
 		registry.Remove(sessionID)
-		if err := cf.CloseSession(r.Context(), sessionID); err != nil {
-			// Non-fatal — the CF session will expire naturally.
-			slog.Warn("sfu: close session", "err", err, "session", sessionID)
-		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
