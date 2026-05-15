@@ -107,7 +107,7 @@ func sfuTracksNew(hub *signaling.Hub, cf *cfrealtime.Client, sessionID, roomID, 
 		resp, err := cf.TracksNew(r.Context(), sessionID, req)
 		if err != nil {
 			slog.Error("sfu: tracks/new", "err", err, "session", sessionID)
-			http.Error(w, "SFU error", http.StatusBadGateway)
+			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 
@@ -152,7 +152,7 @@ func sfuRenegotiate(cf *cfrealtime.Client, sessionID string) http.HandlerFunc {
 
 		if err := cf.Renegotiate(r.Context(), sessionID, body.SessionDescription.Type, body.SessionDescription.SDP); err != nil {
 			slog.Error("sfu: renegotiate", "err", err, "session", sessionID)
-			http.Error(w, "SFU error", http.StatusBadGateway)
+			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 

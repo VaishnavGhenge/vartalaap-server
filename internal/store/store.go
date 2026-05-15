@@ -21,19 +21,22 @@ type Storer interface {
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	GetUserByID(ctx context.Context, id string) (*User, error)
 	SlugExists(ctx context.Context, slug string) (bool, error)
+	UpdateProfile(ctx context.Context, userID, name, slug, timezone string, onboardingStep int) (*User, error)
 	CreateRefreshToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
 	GetRefreshToken(ctx context.Context, tokenHash string) (*RefreshToken, error)
 	DeleteRefreshToken(ctx context.Context, tokenHash string) error
 }
 
 type User struct {
-	ID           string
-	Email        string
-	Name         string
-	Slug         string
-	AvatarURL    *string
-	PasswordHash string
-	CreatedAt    time.Time
+	ID             string
+	Email          string
+	Name           string
+	Slug           string
+	Timezone       string
+	OnboardingStep int
+	AvatarURL      *string
+	PasswordHash   string
+	CreatedAt      time.Time
 }
 
 type RefreshToken struct {
@@ -51,14 +54,20 @@ func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
+const userCols = `id, email, name, slug, timezone, onboarding_step, avatar_url, password_hash, created_at`
+
+func scanUser(row pgx.Row, u *User) error {
+	return row.Scan(&u.ID, &u.Email, &u.Name, &u.Slug, &u.Timezone, &u.OnboardingStep, &u.AvatarURL, &u.PasswordHash, &u.CreatedAt)
+}
+
 func (s *Store) CreateUser(ctx context.Context, email, name, slug, passwordHash string) (*User, error) {
 	u := &User{}
-	err := s.pool.QueryRow(ctx,
+	err := scanUser(s.pool.QueryRow(ctx,
 		`INSERT INTO users (email, name, slug, password_hash)
 		 VALUES ($1, $2, $3, $4)
-		 RETURNING id, email, name, slug, avatar_url, password_hash, created_at`,
+		 RETURNING `+userCols,
 		email, name, slug, passwordHash,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.Slug, &u.AvatarURL, &u.PasswordHash, &u.CreatedAt)
+	), u)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrConflict
@@ -70,11 +79,9 @@ func (s *Store) CreateUser(ctx context.Context, email, name, slug, passwordHash 
 
 func (s *Store) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	u := &User{}
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, name, slug, avatar_url, password_hash, created_at
-		 FROM users WHERE email = $1`,
-		email,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.Slug, &u.AvatarURL, &u.PasswordHash, &u.CreatedAt)
+	err := scanUser(s.pool.QueryRow(ctx,
+		`SELECT `+userCols+` FROM users WHERE email = $1`, email,
+	), u)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -86,16 +93,34 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (*User, error)
 
 func (s *Store) GetUserByID(ctx context.Context, id string) (*User, error) {
 	u := &User{}
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, email, name, slug, avatar_url, password_hash, created_at
-		 FROM users WHERE id = $1`,
-		id,
-	).Scan(&u.ID, &u.Email, &u.Name, &u.Slug, &u.AvatarURL, &u.PasswordHash, &u.CreatedAt)
+	err := scanUser(s.pool.QueryRow(ctx,
+		`SELECT `+userCols+` FROM users WHERE id = $1`, id,
+	), u)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("store: get user by id: %w", err)
+	}
+	return u, nil
+}
+
+func (s *Store) UpdateProfile(ctx context.Context, userID, name, slug, timezone string, onboardingStep int) (*User, error) {
+	u := &User{}
+	err := scanUser(s.pool.QueryRow(ctx,
+		`UPDATE users SET name=$2, slug=$3, timezone=$4, onboarding_step=$5
+		 WHERE id=$1
+		 RETURNING `+userCols,
+		userID, name, slug, timezone, onboardingStep,
+	), u)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		if isUniqueViolation(err) {
+			return nil, ErrConflict
+		}
+		return nil, fmt.Errorf("store: update profile: %w", err)
 	}
 	return u, nil
 }

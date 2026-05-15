@@ -3,13 +3,38 @@ package signaling
 import "sync"
 
 type Room struct {
-	id      string
-	mu      sync.RWMutex
-	members map[string]*Client
+	id         string
+	mu         sync.RWMutex
+	members    map[string]*Client
+	sfuTracks  map[string]SfuTracksData // peerID → published tracks
 }
 
 func newRoom(id string) *Room {
-	return &Room{id: id, members: make(map[string]*Client)}
+	return &Room{id: id, members: make(map[string]*Client), sfuTracks: make(map[string]SfuTracksData)}
+}
+
+func (r *Room) storeSfuTracks(peerID string, data SfuTracksData) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sfuTracks[peerID] = data
+}
+
+func (r *Room) removeSfuTracks(peerID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.sfuTracks, peerID)
+}
+
+// sfuTrackSnapshot returns a copy of all stored sfu-tracks entries.
+// Safe to call without the lock held by the caller.
+func (r *Room) sfuTrackSnapshot() map[string]SfuTracksData {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]SfuTracksData, len(r.sfuTracks))
+	for k, v := range r.sfuTracks {
+		out[k] = v
+	}
+	return out
 }
 
 func (r *Room) add(c *Client) {

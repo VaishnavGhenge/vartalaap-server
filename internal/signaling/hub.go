@@ -41,6 +41,7 @@ func (h *Hub) join(c *Client, roomID string) {
 	replaced = room.removeByPresenceID(presenceID, c.id)
 	if replaced != nil {
 		replaced.room = ""
+		room.removeSfuTracks(replaced.id)
 	}
 	existing := room.peerInfos()
 	room.add(c)
@@ -58,6 +59,12 @@ func (h *Hub) join(c *Client, roomID string) {
 
 	joinedData, _ := json.Marshal(JoinedData{Peers: existing})
 	c.sendJSON(&Envelope{Type: MsgJoined, Room: roomID, Data: joinedData})
+
+	// Replay each existing peer's published SFU tracks so the new joiner can subscribe.
+	for fromPeerID, trackData := range room.sfuTrackSnapshot() {
+		b, _ := json.Marshal(trackData)
+		c.sendJSON(&Envelope{Type: MsgSfuTracks, Room: roomID, From: fromPeerID, Data: b})
+	}
 
 	info := c.info()
 	evt, _ := json.Marshal(PeerJoinedData{
@@ -81,6 +88,7 @@ func (h *Hub) leaveAll(c *Client) {
 		return
 	}
 	room.remove(c.id)
+	room.removeSfuTracks(c.id)
 	h.gcLocked(room)
 	h.mu.Unlock()
 
@@ -141,8 +149,8 @@ func (h *Hub) forwardSignal(from *Client, env *Envelope) {
 	}
 }
 
-// BroadcastSfuTracks sends an sfu-tracks envelope to all peers in roomID except peerID.
-// Called by the HTTP SFU handler after a peer successfully publishes local tracks.
+// BroadcastSfuTracks sends an sfu-tracks envelope to all peers in roomID except peerID,
+// and stores the track info so late-joining peers receive it in their joined flow.
 func (h *Hub) BroadcastSfuTracks(roomID, peerID string, data SfuTracksData) {
 	h.mu.Lock()
 	room := h.rooms[roomID]
@@ -150,6 +158,7 @@ func (h *Hub) BroadcastSfuTracks(roomID, peerID string, data SfuTracksData) {
 	if room == nil {
 		return
 	}
+	room.storeSfuTracks(peerID, data)
 	b, _ := json.Marshal(data)
 	payload, _ := json.Marshal(Envelope{Type: MsgSfuTracks, Room: roomID, From: peerID, Data: b})
 	room.broadcastExcept(peerID, payload)

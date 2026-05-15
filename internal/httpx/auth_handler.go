@@ -32,11 +32,13 @@ type AuthConfig struct {
 }
 
 type authUserResponse struct {
-	ID        string  `json:"id"`
-	Email     string  `json:"email"`
-	Name      string  `json:"name"`
-	Slug      string  `json:"slug"`
-	AvatarURL *string `json:"avatarUrl,omitempty"`
+	ID             string  `json:"id"`
+	Email          string  `json:"email"`
+	Name           string  `json:"name"`
+	Slug           string  `json:"slug"`
+	Timezone       string  `json:"timezone"`
+	OnboardingStep int     `json:"onboardingStep"`
+	AvatarURL      *string `json:"avatarUrl,omitempty"`
 }
 
 type tokenResponse struct {
@@ -45,7 +47,15 @@ type tokenResponse struct {
 }
 
 func toUserResponse(u *store.User) authUserResponse {
-	return authUserResponse{ID: u.ID, Email: u.Email, Name: u.Name, Slug: u.Slug, AvatarURL: u.AvatarURL}
+	return authUserResponse{
+		ID:             u.ID,
+		Email:          u.Email,
+		Name:           u.Name,
+		Slug:           u.Slug,
+		Timezone:       u.Timezone,
+		OnboardingStep: u.OnboardingStep,
+		AvatarURL:      u.AvatarURL,
+	}
 }
 
 // AuthHandlers wires all /auth/* routes onto mux.
@@ -56,8 +66,20 @@ func AuthHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig) {
 	mux.HandleFunc("/auth/login", authRoute(cfg, http.MethodPost, lim, handleLogin(st, cfg)))
 	mux.HandleFunc("/auth/refresh", authRoute(cfg, http.MethodPost, nil, handleRefresh(st, cfg)))
 	mux.HandleFunc("/auth/logout", authRoute(cfg, http.MethodPost, nil, handleLogout(st, cfg)))
-	mux.HandleFunc("/auth/me", authRoute(cfg, http.MethodGet, nil,
-		RequireAuth(cfg.JWTSecret, handleMe(st))))
+	mux.HandleFunc("/auth/me", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodOptions:
+			// Preflight: advertise both methods so PATCH requests are not blocked.
+			authRoute(cfg, http.MethodGet+", "+http.MethodPatch, nil,
+				func(w http.ResponseWriter, r *http.Request) {})(w, r)
+		case http.MethodGet:
+			authRoute(cfg, http.MethodGet, nil, RequireAuth(cfg.JWTSecret, handleMe(st)))(w, r)
+		case http.MethodPatch:
+			authRoute(cfg, http.MethodPatch, nil, RequireAuth(cfg.JWTSecret, handleUpdateMe(st)))(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 }
 
 func authRoute(cfg AuthConfig, method string, lim *RateLimiter, next http.HandlerFunc) http.HandlerFunc {
@@ -197,6 +219,55 @@ func handleMe(st store.Storer) http.HandlerFunc {
 				http.Error(w, "not found", http.StatusNotFound)
 				return
 			}
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(toUserResponse(u))
+	}
+}
+
+var slugRe = regexp.MustCompile(`^[a-z0-9-]{3,30}$`)
+
+func handleUpdateMe(st store.Storer) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, _ := auth.UserIDFromContext(r.Context())
+
+		var body struct {
+			Name           string `json:"name"`
+			Slug           string `json:"slug"`
+			Timezone       string `json:"timezone"`
+			OnboardingStep int    `json:"onboardingStep"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		body.Name = strings.TrimSpace(body.Name)
+		body.Slug = strings.TrimSpace(body.Slug)
+		if body.Name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if body.Slug != "" && !slugRe.MatchString(body.Slug) {
+			http.Error(w, "slug must be 3–30 lowercase letters, numbers, or hyphens", http.StatusBadRequest)
+			return
+		}
+		if body.Timezone == "" {
+			body.Timezone = "UTC"
+		}
+
+		u, err := st.UpdateProfile(r.Context(), userID, body.Name, body.Slug, body.Timezone, body.OnboardingStep)
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				http.Error(w, "slug already taken", http.StatusConflict)
+				return
+			}
+			if errors.Is(err, store.ErrNotFound) {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			slog.Error("auth: update profile", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}

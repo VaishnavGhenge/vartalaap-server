@@ -88,6 +88,28 @@ func (m *memStore) SlugExists(_ context.Context, slug string) (bool, error) {
 	return false, nil
 }
 
+func (m *memStore) UpdateProfile(_ context.Context, userID, name, slug, timezone string, onboardingStep int) (*store.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[userID]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	// Check slug uniqueness (skip if unchanged)
+	if slug != u.Slug {
+		for _, existing := range m.users {
+			if existing.Slug == slug {
+				return nil, store.ErrConflict
+			}
+		}
+	}
+	u.Name = name
+	u.Slug = slug
+	u.Timezone = timezone
+	u.OnboardingStep = onboardingStep
+	return u, nil
+}
+
 func (m *memStore) CreateRefreshToken(_ context.Context, userID, tokenHash string, expiresAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
