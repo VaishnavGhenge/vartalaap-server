@@ -111,24 +111,49 @@ func (c *Client) TracksNew(ctx context.Context, sessionID string, req TracksNewR
 // Renegotiate sends an SDP answer (produced after a subscribe-triggered renegotiation)
 // to Cloudflare. CF returns only a success/error — no SDP is returned.
 // sdpType should be "answer" for the subscribe flow; "offer" for ICE-restart scenarios.
-func (c *Client) Renegotiate(ctx context.Context, sessionID, sdpType, sdp string) error {
+// Returns CF's raw JSON response body so the proxy can forward it verbatim to
+// callers (partytracks parses the body to detect errorCode).
+func (c *Client) Renegotiate(ctx context.Context, sessionID, sdpType, sdp string) ([]byte, error) {
 	req := renegotiateRequest{SessionDescription: SessionDescription{Type: sdpType, SDP: sdp}}
 	body, err := json.Marshal(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	b, err := c.do(ctx, http.MethodPut, fmt.Sprintf("/apps/%s/sessions/%s/renegotiate", c.appID, sessionID), body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var out renegotiateResponse
 	if err := json.Unmarshal(b, &out); err != nil {
-		return fmt.Errorf("cfrealtime: decode renegotiate: %w", err)
+		return nil, fmt.Errorf("cfrealtime: decode renegotiate: %w", err)
 	}
 	if out.ErrorCode != "" {
-		return fmt.Errorf("cfrealtime: renegotiate error %s: %s", out.ErrorCode, out.ErrorDescription)
+		return b, fmt.Errorf("cfrealtime: renegotiate error %s: %s", out.ErrorCode, out.ErrorDescription)
 	}
-	return nil
+	return b, nil
+}
+
+// Passthrough proxies a request to CF verbatim and returns the raw response.
+// Used for endpoints (tracks/update, tracks/close) where we don't need to
+// inspect or modify the request/response shape — partytracks owns both ends.
+func (c *Client) Passthrough(ctx context.Context, method, sessionID, subPath string, body io.Reader) ([]byte, int, error) {
+	path := fmt.Sprintf("/apps/%s/sessions/%s/%s", c.appID, sessionID, subPath)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.appToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("cfrealtime %s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return b, resp.StatusCode, fmt.Errorf("cfrealtime %s %s: %d %s", method, path, resp.StatusCode, string(b))
+	}
+	return b, resp.StatusCode, nil
 }
 
 // CloseTrack closes specific tracks by mid. Use this to cleanly remove

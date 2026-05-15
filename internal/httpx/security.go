@@ -9,7 +9,18 @@ import (
 	"time"
 )
 
-const maxAPIRequestBytes = 16 << 10
+const (
+	// maxAPIRequestBytes caps request bodies for regular API endpoints (auth,
+	// meet, ice). These accept small JSON payloads — 16 KiB is generous.
+	maxAPIRequestBytes = 16 << 10
+
+	// maxSFURequestBytes caps request bodies for the /sfu proxy. SDP offers
+	// for a single peer can include many m-sections (one per published track
+	// plus one per subscribed remote track), and each m-section adds
+	// codecs/extensions/ICE candidates that easily push a multi-peer offer
+	// past tens of KiB. 256 KiB leaves room for ~30+ m-sections.
+	maxSFURequestBytes = 256 << 10
+)
 
 type RateLimiter struct {
 	mu      sync.Mutex
@@ -62,6 +73,13 @@ func (l *RateLimiter) Allow(key string) bool {
 }
 
 func enforceAPIRequest(w http.ResponseWriter, r *http.Request, allowedOrigins []string, methods string, limiter *RateLimiter, extraHeaders ...string) bool {
+	return enforceAPIRequestWithLimit(w, r, allowedOrigins, methods, limiter, maxAPIRequestBytes, extraHeaders...)
+}
+
+// enforceAPIRequestWithLimit is the same as enforceAPIRequest but lets the
+// caller choose the maximum body size. Used by the /sfu proxy where SDP
+// offers exceed the default 16 KiB cap.
+func enforceAPIRequestWithLimit(w http.ResponseWriter, r *http.Request, allowedOrigins []string, methods string, limiter *RateLimiter, maxBytes int64, extraHeaders ...string) bool {
 	if !applyCORS(w, r, allowedOrigins, methods) {
 		return false
 	}
@@ -81,7 +99,7 @@ func enforceAPIRequest(w http.ResponseWriter, r *http.Request, allowedOrigins []
 		return false
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxAPIRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	return true
 }
 

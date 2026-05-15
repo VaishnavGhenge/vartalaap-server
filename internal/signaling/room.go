@@ -13,10 +13,34 @@ func newRoom(id string) *Room {
 	return &Room{id: id, members: make(map[string]*Client), sfuTracks: make(map[string]SfuTracksData)}
 }
 
-func (r *Room) storeSfuTracks(peerID string, data SfuTracksData) {
+// storeSfuTracks merges the new tracks into the peer's cumulative set, keyed by
+// trackName. Returns the full merged payload so the caller can broadcast it.
+// This ensures both live peers and late joiners always see all published tracks,
+// not just the last batch (e.g. audio-only first publish, video added later).
+func (r *Room) storeSfuTracks(peerID string, data SfuTracksData) SfuTracksData {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.sfuTracks[peerID] = data
+	existing, ok := r.sfuTracks[peerID]
+	if !ok {
+		r.sfuTracks[peerID] = data
+		return data
+	}
+	// Upsert by trackName — new data wins on conflict. SessionID is always updated
+	// because it changes when a peer leaves and rejoins with a new CF session.
+	byName := make(map[string]SfuTrackInfo, len(existing.Tracks)+len(data.Tracks))
+	for _, t := range existing.Tracks {
+		byName[t.TrackName] = t
+	}
+	for _, t := range data.Tracks {
+		byName[t.TrackName] = t
+	}
+	merged := make([]SfuTrackInfo, 0, len(byName))
+	for _, t := range byName {
+		merged = append(merged, t)
+	}
+	result := SfuTracksData{SessionID: data.SessionID, Tracks: merged}
+	r.sfuTracks[peerID] = result
+	return result
 }
 
 func (r *Room) removeSfuTracks(peerID string) {

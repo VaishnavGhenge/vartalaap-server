@@ -139,15 +139,6 @@ func (c *Client) handle(env *Envelope) {
 		}
 		c.setState(st.Audio, st.Video, st.ScreenSharing, st.VideoHeld)
 		c.hub.broadcastState(c, st)
-	case MsgSignal:
-		if env.To == "" {
-			c.sendError("signal requires 'to'")
-			return
-		}
-		st := signalSubtype(env.Data)
-		metrics.SignalsTotal.WithLabelValues(st).Inc()
-		slog.Info("ws_msg", "type", "signal", "peer_id", c.id, "room", c.room, "to", env.To, "signal_type", st)
-		c.hub.forwardSignal(c, env)
 	case MsgPing:
 		c.sendJSON(&Envelope{Type: MsgPong})
 	case MsgStatsReport:
@@ -238,19 +229,3 @@ func (c *Client) sendError(msg string) {
 	c.sendJSON(&Envelope{Type: MsgError, Data: data})
 }
 
-func signalSubtype(data json.RawMessage) string {
-	var v struct {
-		Type      string          `json:"type"`
-		Candidate json.RawMessage `json:"candidate"`
-	}
-	if len(data) == 0 || json.Unmarshal(data, &v) != nil {
-		return "unknown"
-	}
-	if v.Type != "" {
-		return v.Type // "offer" or "answer"
-	}
-	if len(v.Candidate) > 0 {
-		return "candidate"
-	}
-	return "unknown"
-}

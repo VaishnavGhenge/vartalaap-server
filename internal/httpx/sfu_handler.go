@@ -14,19 +14,25 @@ import (
 
 // SFUHandlers registers the /sfu/* proxy routes.
 // All routes require a valid JWT — Cloudflare credentials never leave the server.
+//
+// The routes mirror the wire protocol the partytracks client library expects
+// (see partytracks/client). The roomId/peerId for a session are passed via
+// query params on /sfu/sessions/new so partytracks doesn't need to know
+// about our room model.
 func SFUHandlers(mux *http.ServeMux, hub *signaling.Hub, registry *sfu.Registry, cf *cfrealtime.Client, cfg AuthConfig) {
 	lim := NewRateLimiter(60, 120)
 
 	wrap := func(method string, h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			if !enforceAPIRequest(w, r, cfg.AllowedOrigins, method, lim) {
+			// SFU bodies (SDP offers/answers) are much larger than other
+			// endpoints' JSON; use the SFU-specific body cap.
+			if !enforceAPIRequestWithLimit(w, r, cfg.AllowedOrigins, method, lim, maxSFURequestBytes) {
 				return
 			}
 			RequireAuth(cfg.JWTSecret, h)(w, r)
 		}
 	}
 
-	mux.HandleFunc("/sfu/sessions", wrap("POST", handleSFUCreateSession(registry, cf)))
 	mux.HandleFunc("/sfu/sessions/", wrap("POST, PUT, DELETE", handleSFUSessionRoute(hub, registry, cf)))
 }
 
@@ -38,12 +44,15 @@ func handleSFUCreateSession(registry *sfu.Registry, cf *cfrealtime.Client) http.
 		}
 		userID, _ := auth.UserIDFromContext(r.Context())
 
-		var body struct {
-			RoomID string `json:"roomId"`
-			PeerID string `json:"peerId"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RoomID == "" || body.PeerID == "" {
-			http.Error(w, "roomId and peerId are required", http.StatusBadRequest)
+		// partytracks sends roomId and peerId as query params via apiExtraParams.
+		// `kind` is diagnostic only — clients create two CF sessions per peer
+		// (one publish-only, one subscribe-only) and pass kind=publish|subscribe
+		// so server logs can distinguish them.
+		roomID := r.URL.Query().Get("roomId")
+		peerID := r.URL.Query().Get("peerId")
+		kind := r.URL.Query().Get("kind")
+		if roomID == "" || peerID == "" {
+			http.Error(w, "roomId and peerId query params are required", http.StatusBadRequest)
 			return
 		}
 
@@ -54,14 +63,17 @@ func handleSFUCreateSession(registry *sfu.Registry, cf *cfrealtime.Client) http.
 			return
 		}
 
-		registry.Register(sessionID, userID, body.RoomID, body.PeerID)
+		registry.Register(sessionID, userID, roomID, peerID)
+		slog.Info("sfu: session created", "session", sessionID, "peer", peerID, "room", roomID, "kind", kind)
 
 		w.Header().Set("Content-Type", "application/json")
+		// partytracks reads the entire JSON body and extracts sessionId.
 		_ = json.NewEncoder(w).Encode(map[string]string{"sessionId": sessionID})
 	}
 }
 
 // handleSFUSessionRoute dispatches sub-paths under /sfu/sessions/{id}/...
+// Also handles /sfu/sessions/new which creates a new session.
 func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrealtime.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tail := strings.TrimPrefix(r.URL.Path, "/sfu/sessions/")
@@ -73,6 +85,12 @@ func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrea
 		}
 		if sessionID == "" {
 			http.Error(w, "missing session id", http.StatusBadRequest)
+			return
+		}
+
+		// partytracks creates sessions at POST /sfu/sessions/new.
+		if sessionID == "new" && subPath == "" && r.Method == http.MethodPost {
+			handleSFUCreateSession(registry, cf)(w, r)
 			return
 		}
 
@@ -88,6 +106,10 @@ func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrea
 			sfuTracksNew(hub, cf, sessionID, roomID, peerID)(w, r)
 		case subPath == "renegotiate" && r.Method == http.MethodPut:
 			sfuRenegotiate(cf, sessionID)(w, r)
+		case subPath == "tracks/update" && r.Method == http.MethodPut:
+			sfuTracksPassthrough(cf, sessionID, "tracks/update")(w, r)
+		case subPath == "tracks/close" && r.Method == http.MethodPut:
+			sfuTracksPassthrough(cf, sessionID, "tracks/close")(w, r)
 		case subPath == "" && r.Method == http.MethodDelete:
 			sfuClose(registry, sessionID)(w, r)
 		default:
@@ -120,6 +142,9 @@ func sfuTracksNew(hub *signaling.Hub, cf *cfrealtime.Client, sessionID, roomID, 
 					tracks = append(tracks, signaling.SfuTrackInfo{TrackName: t.TrackName, Mid: t.Mid})
 				}
 			}
+			slog.Info("sfu: publish broadcast",
+				"session", sessionID, "peer", peerID, "room", roomID,
+				"resp_tracks", len(resp.Tracks), "filtered_tracks", len(tracks))
 			if len(tracks) > 0 {
 				hub.BroadcastSfuTracks(roomID, peerID, signaling.SfuTracksData{
 					SessionID: sessionID,
@@ -150,13 +175,59 @@ func sfuRenegotiate(cf *cfrealtime.Client, sessionID string) http.HandlerFunc {
 			return
 		}
 
-		if err := cf.Renegotiate(r.Context(), sessionID, body.SessionDescription.Type, body.SessionDescription.SDP); err != nil {
+		respBody, err := cf.Renegotiate(r.Context(), sessionID, body.SessionDescription.Type, body.SessionDescription.SDP)
+		if err != nil {
 			slog.Error("sfu: renegotiate", "err", err, "session", sessionID)
+			// If CF returned an error body, forward it so partytracks can read errorCode.
+			if len(respBody) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write(respBody)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 
-		w.WriteHeader(http.StatusNoContent)
+		w.Header().Set("Content-Type", "application/json")
+		if len(respBody) == 0 {
+			// CF returned an empty body on success; emit {} so partytracks' res.json() succeeds.
+			_, _ = w.Write([]byte("{}"))
+			return
+		}
+		_, _ = w.Write(respBody)
+	}
+}
+
+// sfuTracksPassthrough proxies tracks/update and tracks/close to CF verbatim.
+// Both endpoints accept the same JSON shape (tracks + optional sessionDescription)
+// and we don't need to inspect or broadcast them — they don't introduce new
+// publications, just modify or remove existing ones.
+//
+// partytracks' #fetchWithRecordedHistory calls .clone().json() on every response
+// for its debug history log, so every response MUST contain valid JSON — even
+// if CF returns an empty body on success.
+func sfuTracksPassthrough(cf *cfrealtime.Client, sessionID, subPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		respBody, status, err := cf.Passthrough(r.Context(), r.Method, sessionID, subPath, r.Body)
+		if err != nil {
+			slog.Error("sfu: passthrough", "err", err, "session", sessionID, "subPath", subPath)
+			if len(respBody) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write(respBody)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if len(respBody) == 0 {
+			_, _ = w.Write([]byte("{}"))
+			return
+		}
+		_, _ = w.Write(respBody)
 	}
 }
 

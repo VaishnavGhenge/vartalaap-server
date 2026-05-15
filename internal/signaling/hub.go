@@ -129,28 +129,10 @@ func (h *Hub) forwardState(from *Client, to string, st PeerStateData) {
 	}
 }
 
-func (h *Hub) forwardSignal(from *Client, env *Envelope) {
-	h.mu.Lock()
-	room := h.rooms[from.room]
-	h.mu.Unlock()
-	if room == nil {
-		from.sendError("not in a room")
-		return
-	}
-	target := room.get(env.To)
-	if target == nil {
-		from.sendError("target peer not in room")
-		return
-	}
-	out := Envelope{Type: MsgSignal, Room: from.room, From: from.id, To: env.To, Data: env.Data}
-	b, _ := json.Marshal(out)
-	if !target.enqueue(b) {
-		from.sendError("target peer signaling queue is full")
-	}
-}
-
-// BroadcastSfuTracks sends an sfu-tracks envelope to all peers in roomID except peerID,
-// and stores the track info so late-joining peers receive it in their joined flow.
+// BroadcastSfuTracks merges the new tracks into the peer's cumulative set, then
+// broadcasts the full merged list to all other peers in the room. Storing the
+// merged set (not just the latest batch) ensures late joiners receive all tracks
+// when the hub replays sfu-tracks during join.
 func (h *Hub) BroadcastSfuTracks(roomID, peerID string, data SfuTracksData) {
 	h.mu.Lock()
 	room := h.rooms[roomID]
@@ -158,8 +140,8 @@ func (h *Hub) BroadcastSfuTracks(roomID, peerID string, data SfuTracksData) {
 	if room == nil {
 		return
 	}
-	room.storeSfuTracks(peerID, data)
-	b, _ := json.Marshal(data)
+	merged := room.storeSfuTracks(peerID, data)
+	b, _ := json.Marshal(merged)
 	payload, _ := json.Marshal(Envelope{Type: MsgSfuTracks, Room: roomID, From: peerID, Data: b})
 	room.broadcastExcept(peerID, payload)
 }

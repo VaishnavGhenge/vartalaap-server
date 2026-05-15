@@ -12,7 +12,6 @@ const (
 	MsgPeerJoined  MsgType = "peer-joined"
 	MsgPeerLeft    MsgType = "peer-left"
 	MsgPeerState   MsgType = "peer-state"
-	MsgSignal      MsgType = "signal"
 	MsgError       MsgType = "error"
 	MsgPing        MsgType = "ping"
 	MsgPong        MsgType = "pong"
