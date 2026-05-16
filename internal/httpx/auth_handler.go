@@ -39,6 +39,7 @@ type authUserResponse struct {
 	Timezone       string  `json:"timezone"`
 	OnboardingStep int     `json:"onboardingStep"`
 	AvatarURL      *string `json:"avatarUrl,omitempty"`
+	Plan           string  `json:"plan"`
 }
 
 type tokenResponse struct {
@@ -55,6 +56,7 @@ func toUserResponse(u *store.User) authUserResponse {
 		Timezone:       u.Timezone,
 		OnboardingStep: u.OnboardingStep,
 		AvatarURL:      u.AvatarURL,
+		Plan:           u.Plan,
 	}
 }
 

@@ -142,7 +142,7 @@ func sfuRequest(method, path string, body interface{}, token string) *http.Reque
 	return req
 }
 
-// ─── Tests: POST /sfu/sessions ────────────────────────────────────────────────
+// ─── Tests: POST /sfu/sessions/new ────────────────────────────────────────────
 
 func TestSFUCreateSession_OK(t *testing.T) {
 	cf := newFakeCFServer("cf-session-abc", cfrealtime.TracksNewResponse{})
@@ -153,9 +153,8 @@ func TestSFUCreateSession_OK(t *testing.T) {
 	mux := http.NewServeMux()
 	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
 
-	body := map[string]string{"roomId": "room-1", "peerId": "peer-alice"}
 	token := makeSFUAuthToken("user-1")
-	req := sfuRequest(http.MethodPost, "/sfu/sessions", body, token)
+	req := sfuRequest(http.MethodPost, "/sfu/sessions/new?roomId=room-1&peerId=peer-alice&kind=publish", nil, token)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -190,16 +189,16 @@ func TestSFUCreateSession_MissingBody(t *testing.T) {
 
 	token := makeSFUAuthToken("user-1")
 
-	for _, body := range []interface{}{
-		map[string]string{"roomId": "room-1"},             // missing peerId
-		map[string]string{"peerId": "peer-1"},             // missing roomId
-		map[string]string{"roomId": "", "peerId": "p1"},   // empty roomId
+	for _, path := range []string{
+		"/sfu/sessions/new?roomId=room-1",     // missing peerId
+		"/sfu/sessions/new?peerId=peer-1",     // missing roomId
+		"/sfu/sessions/new?roomId=&peerId=p1", // empty roomId
 	} {
-		req := sfuRequest(http.MethodPost, "/sfu/sessions", body, token)
+		req := sfuRequest(http.MethodPost, path, nil, token)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {
-			t.Errorf("expected 400, got %d for body %v", rec.Code, body)
+			t.Errorf("expected 400, got %d for path %s", rec.Code, path)
 		}
 	}
 }
@@ -213,8 +212,7 @@ func TestSFUCreateSession_Unauthenticated(t *testing.T) {
 	mux := http.NewServeMux()
 	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
 
-	body := map[string]string{"roomId": "room-1", "peerId": "peer-1"}
-	req := sfuRequest(http.MethodPost, "/sfu/sessions", body, "")
+	req := sfuRequest(http.MethodPost, "/sfu/sessions/new?roomId=room-1&peerId=peer-1", nil, "")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -333,8 +331,11 @@ func TestSFURenegotiate_OK(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.TrimSpace(rec.Body.String()) != "{}" {
+		t.Fatalf("expected JSON empty object, got %q", rec.Body.String())
 	}
 }
 

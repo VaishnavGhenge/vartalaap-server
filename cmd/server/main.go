@@ -96,22 +96,40 @@ func main() {
 		defer pool.Close()
 
 		st := store.New(pool)
-		httpx.AuthHandlers(mux, st, httpx.AuthConfig{
+		authCfg := httpx.AuthConfig{
 			AllowedOrigins: cfg.AllowedOrigins,
 			JWTSecret:      cfg.JWTSecret,
 			AccessTokenTTL: cfg.AccessTokenTTL,
 			SecureCookie:   cfg.SecureCookie,
-		})
+		}
+		httpx.AuthHandlers(mux, st, authCfg)
+		httpx.MeHandlers(mux, st, authCfg)
+		httpx.BookingHandlers(mux, st, authCfg)
 		log.Println("Auth endpoints enabled")
+		log.Println("Scheduling endpoints enabled: /me/availability, /me/event-types")
+		log.Println("Booking endpoints enabled: /bookings, /me/bookings")
 	} else {
 		log.Println("WARN: Auth endpoints disabled (missing DATABASE_URL or JWT_SECRET)")
 	}
 
 	sentinel := sentryhttp.New(sentryhttp.Options{Repanic: true})
 
+	// Middleware order: RequestID first so every later layer (metrics, logs,
+	// Sentry, handlers) sees the same X-Request-Id. Metrics next so the
+	// histogram covers the handler's real work, not just the inner mux dispatch.
+	// LogMiddleware reads request_id from context and emits a structured line
+	// per request. Sentry's sentinel runs nearest the handler so panics inside
+	// the handler — not the middleware — are what get captured.
+	handler := httpx.RequestIDMiddleware(
+		httpx.MetricsMiddleware(
+			httpx.LogMiddleware(
+				sentinel.Handle(mux),
+			),
+		),
+	)
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           httpx.LogMiddleware(sentinel.Handle(mux)),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Printf("vartalaap-server listening on :%s", cfg.Port)

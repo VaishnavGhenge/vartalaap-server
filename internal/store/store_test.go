@@ -241,3 +241,173 @@ func TestDeleteExpiredRefreshTokens(t *testing.T) {
 		t.Fatalf("expected valid token to still exist: %v", err)
 	}
 }
+
+// --- ListAvailability / ReplaceAvailability ---
+
+// availabilityHost creates a fresh user for an availability test and returns
+// the user ID. Centralised so each test isn't 5 lines of register noise.
+func availabilityHost(t *testing.T, st *store.Store) string {
+	t.Helper()
+	u, err := st.CreateUser(context.Background(),
+		unique("avail")+"@example.com",
+		"Avail Host",
+		unique("avail-host"),
+		"hashed",
+	)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	return u.ID
+}
+
+func TestListAvailability_Empty(t *testing.T) {
+	st := newStore(t)
+	hostID := availabilityHost(t, st)
+
+	rules, err := st.ListAvailability(context.Background(), hostID)
+	if err != nil {
+		t.Fatalf("ListAvailability: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("expected 0 rules for new host, got %d", len(rules))
+	}
+}
+
+func TestReplaceAvailability_InsertsAndOrders(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	hostID := availabilityHost(t, st)
+
+	// Deliberately out of order on insert; ListAvailability must sort by day
+	// then start_time so the API returns a stable shape.
+	input := []store.AvailabilityRule{
+		{DayOfWeek: 3, StartTime: "14:00", EndTime: "17:00", Timezone: "UTC"},
+		{DayOfWeek: 1, StartTime: "13:00", EndTime: "17:00", Timezone: "UTC"},
+		{DayOfWeek: 1, StartTime: "09:00", EndTime: "12:00", Timezone: "UTC"},
+	}
+	saved, err := st.ReplaceAvailability(ctx, hostID, input)
+	if err != nil {
+		t.Fatalf("ReplaceAvailability: %v", err)
+	}
+	if len(saved) != 3 {
+		t.Fatalf("expected 3 rules, got %d", len(saved))
+	}
+	// Returned set is the ordered ListAvailability shape.
+	if saved[0].DayOfWeek != 1 || saved[0].StartTime != "09:00" {
+		t.Fatalf("expected first Mon 09:00, got %+v", saved[0])
+	}
+	if saved[1].DayOfWeek != 1 || saved[1].StartTime != "13:00" {
+		t.Fatalf("expected second Mon 13:00, got %+v", saved[1])
+	}
+	if saved[2].DayOfWeek != 3 {
+		t.Fatalf("expected third Wed, got %+v", saved[2])
+	}
+	for _, r := range saved {
+		if r.ID == "" {
+			t.Fatalf("expected generated id, got empty for %+v", r)
+		}
+		if r.HostID != hostID {
+			t.Fatalf("expected host_id %q, got %q", hostID, r.HostID)
+		}
+	}
+}
+
+func TestReplaceAvailability_DeletesPriorRules(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	hostID := availabilityHost(t, st)
+
+	// First write — 2 rules.
+	_, err := st.ReplaceAvailability(ctx, hostID, []store.AvailabilityRule{
+		{DayOfWeek: 0, StartTime: "08:00", EndTime: "09:00", Timezone: "UTC"},
+		{DayOfWeek: 1, StartTime: "08:00", EndTime: "09:00", Timezone: "UTC"},
+	})
+	if err != nil {
+		t.Fatalf("first replace: %v", err)
+	}
+
+	// Second write — 1 rule on a different day. The two earlier rules must
+	// be gone; this is the property the UI relies on to make "edit my week"
+	// idempotent.
+	saved, err := st.ReplaceAvailability(ctx, hostID, []store.AvailabilityRule{
+		{DayOfWeek: 5, StartTime: "15:00", EndTime: "18:00", Timezone: "UTC"},
+	})
+	if err != nil {
+		t.Fatalf("second replace: %v", err)
+	}
+	if len(saved) != 1 || saved[0].DayOfWeek != 5 {
+		t.Fatalf("expected exactly Friday rule, got %+v", saved)
+	}
+}
+
+func TestReplaceAvailability_EmptySetClearsAll(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	hostID := availabilityHost(t, st)
+
+	if _, err := st.ReplaceAvailability(ctx, hostID, []store.AvailabilityRule{
+		{DayOfWeek: 2, StartTime: "10:00", EndTime: "11:00", Timezone: "UTC"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Passing an empty slice is how the UI says "I am unavailable every day".
+	// It must not error and must leave the host with zero rules.
+	saved, err := st.ReplaceAvailability(ctx, hostID, []store.AvailabilityRule{})
+	if err != nil {
+		t.Fatalf("clear replace: %v", err)
+	}
+	if len(saved) != 0 {
+		t.Fatalf("expected 0 rules after empty replace, got %d", len(saved))
+	}
+}
+
+func TestReplaceAvailability_PerHostIsolation(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	hostA := availabilityHost(t, st)
+	hostB := availabilityHost(t, st)
+
+	if _, err := st.ReplaceAvailability(ctx, hostA, []store.AvailabilityRule{
+		{DayOfWeek: 1, StartTime: "08:00", EndTime: "09:00", Timezone: "UTC"},
+		{DayOfWeek: 2, StartTime: "08:00", EndTime: "09:00", Timezone: "UTC"},
+	}); err != nil {
+		t.Fatalf("seed A: %v", err)
+	}
+	if _, err := st.ReplaceAvailability(ctx, hostB, []store.AvailabilityRule{
+		{DayOfWeek: 6, StartTime: "20:00", EndTime: "22:00", Timezone: "UTC"},
+	}); err != nil {
+		t.Fatalf("seed B: %v", err)
+	}
+
+	rulesA, _ := st.ListAvailability(ctx, hostA)
+	rulesB, _ := st.ListAvailability(ctx, hostB)
+	if len(rulesA) != 2 {
+		t.Fatalf("host A expected 2 rules, got %d", len(rulesA))
+	}
+	if len(rulesB) != 1 {
+		t.Fatalf("host B expected 1 rule, got %d", len(rulesB))
+	}
+
+	// Replacing A's set must not perturb B.
+	if _, err := st.ReplaceAvailability(ctx, hostA, []store.AvailabilityRule{}); err != nil {
+		t.Fatalf("clear A: %v", err)
+	}
+	rulesB2, _ := st.ListAvailability(ctx, hostB)
+	if len(rulesB2) != 1 {
+		t.Fatalf("host B expected to still have 1 rule after A cleared, got %d", len(rulesB2))
+	}
+}
+
+func TestNewUserDefaultsToFreePlan(t *testing.T) {
+	st := newStore(t)
+	u, err := st.CreateUser(context.Background(),
+		unique("plan")+"@example.com", "Plan User", unique("plan-user"), "h",
+	)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if u.Plan != "free" {
+		t.Fatalf("expected default plan 'free', got %q", u.Plan)
+	}
+}

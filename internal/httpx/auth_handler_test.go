@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -21,7 +22,13 @@ type memStore struct {
 	users  map[string]*store.User  // key: id
 	byEmail map[string]string       // email -> id
 	tokens map[string]*store.RefreshToken // key: tokenHash
+	avail  map[string][]store.AvailabilityRule // hostID -> rules
+	events map[string]*store.EventType // key: event id
+	bookings map[string]*store.Booking // key: booking id
 	nextID int
+	nextAvailID int
+	nextEventID int
+	nextBookingID int
 }
 
 func newMemStore() *memStore {
@@ -29,6 +36,9 @@ func newMemStore() *memStore {
 		users:   make(map[string]*store.User),
 		byEmail: make(map[string]string),
 		tokens:  make(map[string]*store.RefreshToken),
+		avail:   make(map[string][]store.AvailabilityRule),
+		events:   make(map[string]*store.EventType),
+		bookings: make(map[string]*store.Booking),
 	}
 }
 
@@ -49,6 +59,10 @@ func (m *memStore) CreateUser(_ context.Context, email, name, slug, passwordHash
 		Name:         name,
 		Slug:         slug,
 		PasswordHash: passwordHash,
+		// Mirror the DB default — `plan text not null default 'free'`. Without
+		// this the plan-gating handler tests would see empty-string and skip
+		// every branch.
+		Plan:         "free",
 		CreatedAt:    time.Now(),
 	}
 	m.nextID++
@@ -75,6 +89,18 @@ func (m *memStore) GetUserByID(_ context.Context, id string) (*store.User, error
 		return nil, store.ErrNotFound
 	}
 	return u, nil
+}
+
+func (m *memStore) GetUserBySlug(_ context.Context, slug string) (*store.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, u := range m.users {
+		if u.Slug == slug {
+			copy := *u
+			return &copy, nil
+		}
+	}
+	return nil, store.ErrNotFound
 }
 
 func (m *memStore) SlugExists(_ context.Context, slug string) (bool, error) {
@@ -137,6 +163,264 @@ func (m *memStore) DeleteRefreshToken(_ context.Context, tokenHash string) error
 	defer m.mu.Unlock()
 	delete(m.tokens, tokenHash)
 	return nil
+}
+
+// Availability methods — persisted in-memory so me_handler_test.go can
+// round-trip without a real DB. Rules are returned sorted by day_of_week then
+// start_time to mirror the production query.
+func (m *memStore) ListAvailability(_ context.Context, hostID string) ([]store.AvailabilityRule, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	src := m.avail[hostID]
+	out := make([]store.AvailabilityRule, len(src))
+	copy(out, src)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].DayOfWeek != out[j].DayOfWeek {
+			return out[i].DayOfWeek < out[j].DayOfWeek
+		}
+		return out[i].StartTime < out[j].StartTime
+	})
+	return out, nil
+}
+
+func (m *memStore) ReplaceAvailability(_ context.Context, hostID string, rules []store.AvailabilityRule) ([]store.AvailabilityRule, error) {
+	m.mu.Lock()
+	saved := make([]store.AvailabilityRule, 0, len(rules))
+	for _, r := range rules {
+		m.nextAvailID++
+		r.ID = fmt.Sprintf("avail-%d", m.nextAvailID)
+		r.HostID = hostID
+		saved = append(saved, r)
+	}
+	m.avail[hostID] = saved
+	m.mu.Unlock()
+	return m.ListAvailability(context.Background(), hostID)
+}
+
+// Event types — straight in-memory mirror of the Postgres-backed store. Tests
+// that care about CHECK constraints should run against the real DB
+// (store_test.go); these stubs are for handler-layer behaviour.
+func (m *memStore) ListEventTypes(_ context.Context, hostID string, activeOnly bool) ([]store.EventType, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]store.EventType, 0)
+	for _, e := range m.events {
+		if e.HostID != hostID {
+			continue
+		}
+		if activeOnly && !e.IsActive {
+			continue
+		}
+		out = append(out, *e)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
+func (m *memStore) GetEventTypeBySlug(_ context.Context, hostID, slug string) (*store.EventType, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, e := range m.events {
+		if e.HostID == hostID && e.Slug == slug {
+			copy := *e
+			return &copy, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (m *memStore) GetEventType(_ context.Context, hostID, id string) (*store.EventType, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.events[id]
+	if !ok || e.HostID != hostID {
+		return nil, store.ErrNotFound
+	}
+	copy := *e
+	return &copy, nil
+}
+
+func (m *memStore) CreateEventType(_ context.Context, e store.EventType) (*store.EventType, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Enforce unique (host_id, slug) so the conflict path is reachable in tests.
+	for _, existing := range m.events {
+		if existing.HostID == e.HostID && existing.Slug == e.Slug {
+			return nil, store.ErrConflict
+		}
+	}
+	m.nextEventID++
+	e.ID = fmt.Sprintf("event-%d", m.nextEventID)
+	e.CreatedAt = time.Now()
+	clone := e
+	m.events[e.ID] = &clone
+	out := clone
+	return &out, nil
+}
+
+func (m *memStore) UpdateEventType(_ context.Context, e store.EventType) (*store.EventType, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.events[e.ID]
+	if !ok || cur.HostID != e.HostID {
+		return nil, store.ErrNotFound
+	}
+	for _, other := range m.events {
+		if other.ID == e.ID {
+			continue
+		}
+		if other.HostID == e.HostID && other.Slug == e.Slug {
+			return nil, store.ErrConflict
+		}
+	}
+	// Preserve CreatedAt (Update doesn't move it in SQL).
+	e.CreatedAt = cur.CreatedAt
+	clone := e
+	m.events[e.ID] = &clone
+	out := clone
+	return &out, nil
+}
+
+func (m *memStore) DeleteEventType(_ context.Context, hostID, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.events[id]
+	if !ok || e.HostID != hostID {
+		return store.ErrNotFound
+	}
+	e.IsActive = false
+	return nil
+}
+
+func (m *memStore) CountActiveEventTypes(_ context.Context, hostID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, e := range m.events {
+		if e.HostID == hostID && e.IsActive {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// Bookings — straightforward in-memory mirror. Meet-code uniqueness is
+// enforced so the handler's collision-retry path is reachable in tests.
+func (m *memStore) CreateBooking(_ context.Context, b store.Booking) (*store.Booking, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, existing := range m.bookings {
+		if existing.MeetCode == b.MeetCode {
+			return nil, store.ErrConflict
+		}
+	}
+	m.nextBookingID++
+	b.ID = fmt.Sprintf("booking-%d", m.nextBookingID)
+	b.CreatedAt = time.Now()
+	clone := b
+	m.bookings[b.ID] = &clone
+	out := clone
+	return &out, nil
+}
+
+func (m *memStore) GetBookingByID(_ context.Context, id string) (*store.Booking, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.bookings[id]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	copy := *b
+	return &copy, nil
+}
+
+func (m *memStore) GetBookingByMeetCode(_ context.Context, meetCode string) (*store.Booking, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, b := range m.bookings {
+		if b.MeetCode == meetCode {
+			copy := *b
+			return &copy, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (m *memStore) ListBookingsForHost(_ context.Context, hostID string, fromUTC time.Time, limit int) ([]store.Booking, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	out := make([]store.Booking, 0)
+	for _, b := range m.bookings {
+		if b.HostID != hostID {
+			continue
+		}
+		if b.Status == "cancelled" {
+			continue
+		}
+		if b.StartsAt.Before(fromUTC) {
+			continue
+		}
+		out = append(out, *b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartsAt.Before(out[j].StartsAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *memStore) ListBookingsForEventInRange(_ context.Context, eventTypeID string, fromUTC, toUTC time.Time) ([]store.Booking, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]store.Booking, 0)
+	for _, b := range m.bookings {
+		if b.EventTypeID != eventTypeID || b.Status == "cancelled" {
+			continue
+		}
+		// Half-open interval overlap.
+		if b.StartsAt.Before(toUTC) && b.EndsAt.After(fromUTC) {
+			out = append(out, *b)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartsAt.Before(out[j].StartsAt) })
+	return out, nil
+}
+
+func (m *memStore) CancelBooking(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.bookings[id]
+	if !ok || b.Status == "cancelled" {
+		return store.ErrNotFound
+	}
+	b.Status = "cancelled"
+	return nil
+}
+
+func (m *memStore) CountBookingsInMonth(_ context.Context, hostID string, year int, month time.Month) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	start := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
+	end := start.AddDate(0, 1, 0)
+	n := 0
+	for _, b := range m.bookings {
+		if b.HostID != hostID {
+			continue
+		}
+		if b.Status == "cancelled" {
+			continue
+		}
+		if b.CreatedAt.Before(start) || !b.CreatedAt.Before(end) {
+			continue
+		}
+		n++
+	}
+	return n, nil
 }
 
 // --- test helpers ---

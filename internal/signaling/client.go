@@ -101,6 +101,10 @@ func (c *Client) readPump(ctx context.Context) {
 }
 
 func (c *Client) handle(env *Envelope) {
+	// Count every handled message. The label is the message type so we can
+	// detect signaling storms, peer-state churn, or a missing client-metric
+	// from a peer that should have completed setup.
+	metrics.SignalsTotal.WithLabelValues(string(env.Type)).Inc()
 	switch env.Type {
 	case MsgJoin:
 		if env.Room == "" {
@@ -187,8 +191,70 @@ func (c *Client) handle(env *Envelope) {
 			)
 		}
 		slog.Info("stats_report", args...)
+	case MsgClientMetric:
+		var m ClientMetricData
+		if len(env.Data) > 0 {
+			if err := json.Unmarshal(env.Data, &m); err != nil {
+				return
+			}
+		}
+		c.observeClientMetric(m)
 	default:
 		c.sendError("unknown message type: " + string(env.Type))
+	}
+}
+
+// observeClientMetric translates one browser-side observation into a Prometheus
+// observation. Validation is strict on purpose — a malformed value would
+// otherwise pollute the histogram permanently. We bound values to a sane
+// ceiling (60s) so a bug in the client clock can't blow out the buckets.
+func (c *Client) observeClientMetric(m ClientMetricData) {
+	const maxObservation = 60.0 // anything beyond this is a clock skew or bug
+	v := m.Value
+	if v < 0 || v != v { // negative or NaN
+		return
+	}
+	if v > maxObservation {
+		v = maxObservation
+	}
+	switch m.Name {
+	case "time_to_first_media":
+		metrics.TimeToFirstMedia.Observe(v)
+		slog.Info("client_metric",
+			"peer_id", c.id, "room", c.room,
+			"name", m.Name, "value_s", v,
+		)
+	case "call_setup_phase":
+		phase := m.Phase
+		switch phase {
+		case "ice_gather", "pub_connected", "sub_connected", "first_media":
+			metrics.CallSetupPhase.WithLabelValues(phase).Observe(v)
+		default:
+			return
+		}
+		slog.Info("client_metric",
+			"peer_id", c.id, "room", c.room,
+			"name", m.Name, "phase", phase, "value_s", v,
+		)
+	case "call_attempt":
+		result := m.Result
+		switch result {
+		case "success", "timeout", "error", "abandoned":
+			metrics.CallAttempts.WithLabelValues(result).Inc()
+		default:
+			return
+		}
+		slog.Info("client_metric",
+			"peer_id", c.id, "room", c.room,
+			"name", m.Name, "result", result,
+		)
+	default:
+		// Unknown metric name. Logging at debug level avoids amplifying a buggy
+		// client into a log flood — at info level a misbehaving browser could
+		// emit thousands of lines/s.
+		slog.Debug("client_metric_unknown",
+			"peer_id", c.id, "name", m.Name,
+		)
 	}
 }
 
