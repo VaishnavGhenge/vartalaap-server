@@ -29,7 +29,7 @@ func TestRenderBookingConfirmation_ContainsKeyData(t *testing.T) {
 	if msg.Subject != "Booked: Intro call with Alex Host" {
 		t.Fatalf("subject: %q", msg.Subject)
 	}
-	if got := msg.To[0]; got != "Pat Guest <pat@example.com>" {
+	if got := msg.To[0]; got != `"Pat Guest" <pat@example.com>` {
 		t.Fatalf("To header: %q", got)
 	}
 	// The room URL must appear in both the text and HTML body so older mail
@@ -51,7 +51,7 @@ func TestRenderBookingConfirmation_ContainsKeyData(t *testing.T) {
 
 func TestRenderBookingNotification_GoesToHost(t *testing.T) {
 	msg := RenderBookingNotification(sampleInput(), "Sessionly <no-reply@sessionly.test>")
-	if msg.To[0] != "Alex Host <alex@example.com>" {
+	if msg.To[0] != `"Alex Host" <alex@example.com>` {
 		t.Fatalf("notification should go to host, got %v", msg.To)
 	}
 	if !strings.Contains(msg.TextBody, "Pat Guest") {
@@ -105,7 +105,7 @@ func TestEncodeMessage_RoundTripsMixedMultipart(t *testing.T) {
 	}
 	want := []string{
 		"From: Sessionly <no-reply@sessionly.test>",
-		"To: Pat Guest <pat@example.com>",
+		`To: "Pat Guest" <pat@example.com>`,
 		"Content-Type: multipart/mixed",
 		"Content-Type: multipart/alternative",
 		"Content-Type: text/plain",
@@ -116,6 +116,25 @@ func TestEncodeMessage_RoundTripsMixedMultipart(t *testing.T) {
 		if !strings.Contains(string(body), w) {
 			t.Fatalf("missing %q in encoded body. body=\n%s", w, string(body))
 		}
+	}
+}
+
+func TestEncodeMessage_StripsHeaderInjection(t *testing.T) {
+	in := sampleInput()
+	in.GuestName = "Pat\r\nBcc: attacker@example.com"
+	in.EventTitle = "Intro\r\nX-Injected: yes"
+
+	msg := RenderBookingConfirmation(in, "Sessionly <no-reply@sessionly.test>")
+	body, err := encodeMessage(msg, msg.From)
+	if err != nil {
+		t.Fatalf("encodeMessage: %v", err)
+	}
+	headers := strings.SplitN(string(body), "\r\n\r\n", 2)[0]
+	if strings.Contains(headers, "\r\nBcc:") || strings.Contains(headers, "\r\nX-Injected:") {
+		t.Fatalf("header injection was not stripped:\n%s", headers)
+	}
+	if !strings.Contains(headers, "Pat  Bcc: attacker@example.com") {
+		t.Fatalf("expected injected guest name to be flattened, got:\n%s", headers)
 	}
 }
 

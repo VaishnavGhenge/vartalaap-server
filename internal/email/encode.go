@@ -19,8 +19,8 @@ func encodeMessage(msg Message, from string) ([]byte, error) {
 
 	var buf bytes.Buffer
 	headers := []struct{ k, v string }{
-		{"From", from},
-		{"To", strings.Join(msg.To, ", ")},
+		{"From", sanitizeHeaderValue(from)},
+		{"To", sanitizeHeaderValue(strings.Join(msg.To, ", "))},
 		{"Subject", encodeHeader(msg.Subject)},
 		{"Date", time.Now().UTC().Format(time.RFC1123Z)},
 		{"MIME-Version", "1.0"},
@@ -74,6 +74,7 @@ func writeAltPart(buf *bytes.Buffer, boundary, contentType, body string) {
 }
 
 func encodeHeader(s string) string {
+	s = sanitizeHeaderValue(s)
 	// If all ASCII keep verbatim; otherwise wrap as encoded-word.
 	for _, r := range s {
 		if r > 0x7f {
@@ -81,6 +82,12 @@ func encodeHeader(s string) string {
 		}
 	}
 	return s
+}
+
+func sanitizeHeaderValue(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.TrimSpace(s)
 }
 
 // randomToken returns a short, unique-enough boundary suffix. Time-based

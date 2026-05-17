@@ -47,10 +47,21 @@ func (r *recordingMailer) Messages() []email.Message {
 // handler's behaviour, not the routing glue. Production wiring lives in
 // SlotHandlers() and is exercised by the build tests + the e2e walkthrough.
 func dispatchPublic(st store.Storer, w http.ResponseWriter, r *http.Request) {
+	dispatchPublicWithDeps(st, BookingDeps{}, w, r)
+}
+
+func dispatchPublicWithDeps(st store.Storer, deps BookingDeps, w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	if strings.HasPrefix(path, "/m/") {
 		code := strings.TrimPrefix(path, "/m/")
-		handleGetBookingByMeetCode(st, code)(w, r)
+		switch r.Method {
+		case http.MethodGet:
+			handleGetBookingByMeetCode(st, code)(w, r)
+		case http.MethodDelete:
+			handleGuestCancelBooking(st, deps, code)(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 		return
 	}
 	if !strings.HasPrefix(path, "/u/") {
@@ -565,6 +576,131 @@ func TestGetBookingByMeetCode_NotFound(t *testing.T) {
 	dispatchPublic(st, rec, publicReq(http.MethodGet, "/m/zzz-zzzz-zzz"))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown code must 404, got %d", rec.Code)
+	}
+}
+
+// ─── Cancel paths ────────────────────────────────────────────────────────────
+
+// seedBooking provisions a host, event, and one confirmed booking. Returns the
+// booking and the host's token for follow-up host-side requests.
+func seedBooking(t *testing.T, st *memStore) (*store.Booking, *store.User, *store.EventType, string) {
+	t.Helper()
+	host, event, _, _ := bookingFixture(t, st, "host@example.com")
+	start := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Minute)
+	b, err := st.CreateBooking(context.Background(), store.Booking{
+		EventTypeID: event.ID, HostID: host.ID,
+		GuestName: "Pat", GuestEmail: "pat@example.com",
+		StartsAt: start, EndsAt: start.Add(30 * time.Minute),
+		MeetCode: "can-celab-le1", Status: "confirmed",
+	})
+	if err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+	return b, host, event, tokenForUser(t, host.ID)
+}
+
+func TestGuestCancel_HappyPath(t *testing.T) {
+	st := newMemStore()
+	b, _, _, _ := seedBooking(t, st)
+	mailer := &recordingMailer{}
+	deps := BookingDeps{Mailer: mailer, PublicAppURL: "https://app.test"}
+
+	rec := httptest.NewRecorder()
+	dispatchPublicWithDeps(st, deps, rec, publicReq(http.MethodDelete, "/m/"+b.MeetCode))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("want 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Booking is now cancelled in the store.
+	got, _ := st.GetBookingByID(context.Background(), b.ID)
+	if got.Status != "cancelled" {
+		t.Fatalf("want status=cancelled, got %q", got.Status)
+	}
+	// Email fired with both recipients.
+	if msgs := mailer.Messages(); len(msgs) != 1 || len(msgs[0].To) != 2 {
+		t.Fatalf("expected 1 cancellation email to both parties, got %+v", msgs)
+	}
+}
+
+func TestGuestCancel_UnknownCodeIs404(t *testing.T) {
+	st := newMemStore()
+	rec := httptest.NewRecorder()
+	dispatchPublicWithDeps(st, BookingDeps{}, rec, publicReq(http.MethodDelete, "/m/no-such-code"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404 for unknown code, got %d", rec.Code)
+	}
+}
+
+func TestGuestCancel_Idempotent(t *testing.T) {
+	st := newMemStore()
+	b, _, _, _ := seedBooking(t, st)
+	deps := BookingDeps{Mailer: &recordingMailer{}}
+
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		dispatchPublicWithDeps(st, deps, rec, publicReq(http.MethodDelete, "/m/"+b.MeetCode))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("cancel attempt %d: want 204, got %d", i, rec.Code)
+		}
+	}
+}
+
+func TestHostCancel_HappyPath(t *testing.T) {
+	st := newMemStore()
+	b, _, _, token := seedBooking(t, st)
+	mailer := &recordingMailer{}
+	deps := BookingDeps{Mailer: mailer, PublicAppURL: "https://app.test"}
+
+	req := authReq(http.MethodDelete, "/bookings/"+b.ID, "")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	RequireAuth(testSecret, handleHostCancelBooking(st, deps, b.ID))(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("want 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := st.GetBookingByID(context.Background(), b.ID)
+	if got.Status != "cancelled" {
+		t.Fatalf("want cancelled, got %q", got.Status)
+	}
+}
+
+func TestHostCancel_RejectsOtherHosts(t *testing.T) {
+	st := newMemStore()
+	b, _, _, _ := seedBooking(t, st)
+	// Register a different host and use their token — must get 404, not 403,
+	// so cross-host probing can't enumerate booking IDs.
+	registerUser(t, st, "intruder@example.com", "password123")
+	intruder, _ := st.GetUserByEmail(context.Background(), "intruder@example.com")
+	otherTok := tokenForUser(t, intruder.ID)
+
+	req := authReq(http.MethodDelete, "/bookings/"+b.ID, "")
+	req.Header.Set("Authorization", "Bearer "+otherTok)
+	rec := httptest.NewRecorder()
+	RequireAuth(testSecret, handleHostCancelBooking(st, BookingDeps{}, b.ID))(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-host cancel must 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := st.GetBookingByID(context.Background(), b.ID)
+	if got.Status != "confirmed" {
+		t.Fatalf("status must not have changed; got %q", got.Status)
+	}
+}
+
+func TestCancelledSlotBecomesBookableAgain(t *testing.T) {
+	st := newMemStore()
+	b, host, event, _ := seedBooking(t, st)
+	// Cancel it.
+	if err := st.CancelBooking(context.Background(), b.ID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	// Re-booking the exact same slot via POST /bookings must succeed.
+	body := fmt.Sprintf(`{
+		"hostSlug": %q, "eventTypeSlug": %q, "startsAt": %q,
+		"guestName": "Second", "guestEmail": "second@example.com"
+	}`, host.Slug, event.Slug, b.StartsAt.Format(time.RFC3339))
+	rec := httptest.NewRecorder()
+	handleCreateBooking(st, BookingDeps{Mailer: &recordingMailer{}})(rec, authReq(http.MethodPost, "/bookings", body))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("re-booking a cancelled slot must succeed; got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"html"
+	"net/mail"
 	"strings"
 	"time"
 )
@@ -113,6 +114,59 @@ func RenderBookingNotification(in BookingInput, from string) Message {
 	}
 }
 
+// RenderBookingCancellation is sent to both parties when a booking is
+// cancelled. `cancelledBy` is "host" or "guest" so the message frames it from
+// the right side ("Pat cancelled" vs "you cancelled"). One message is built
+// per recipient so the To header is right; the body is shared.
+func RenderBookingCancellation(in BookingInput, from, cancelledBy string) Message {
+	when := formatWhen(in.StartsAt, in.EndsAt, in.HostTimezone)
+	byLabel := cancelledBy
+	if byLabel == "" {
+		byLabel = "someone"
+	}
+	text := strings.Join([]string{
+		fmt.Sprintf("This booking was cancelled by the %s.", byLabel),
+		"",
+		fmt.Sprintf("Event: %s (%d min)", in.EventTitle, in.EventMinutes),
+		fmt.Sprintf("When:  %s", when),
+		fmt.Sprintf("With:  %s and %s", in.HostName, in.GuestName),
+	}, "\n")
+	htmlBody := renderHTML(map[string]string{
+		"CancelledBy": html.EscapeString(byLabel),
+		"EventTitle":  html.EscapeString(in.EventTitle),
+		"Duration":    fmt.Sprintf("%d min", in.EventMinutes),
+		"When":        html.EscapeString(when),
+		"HostName":    html.EscapeString(in.HostName),
+		"GuestName":   html.EscapeString(in.GuestName),
+	}, cancelHTML)
+	// Recipient = both. Most SMTP providers handle multi-recipient sends
+	// fine; if your provider can't, split into two Send calls upstream.
+	to := []string{
+		addressLine(in.HostName, in.HostEmail),
+		addressLine(in.GuestName, in.GuestEmail),
+	}
+	return Message{
+		To:       to,
+		From:     from,
+		Subject:  fmt.Sprintf("Cancelled: %s", in.EventTitle),
+		TextBody: text,
+		HTMLBody: htmlBody,
+	}
+}
+
+const cancelHTML = `<!doctype html>
+<html><body style="font-family:system-ui,sans-serif;line-height:1.5;color:#1a1a1a">
+<table cellpadding="0" cellspacing="0" style="max-width:520px;margin:24px auto;padding:24px;border:1px solid #eee;border-radius:12px">
+<tr><td>
+<h2 style="margin:0 0 8px;font-weight:600">Booking cancelled</h2>
+<p style="margin:0 0 16px;color:#666">{{.EventTitle}} · {{.Duration}}</p>
+<p style="margin:0 0 4px"><strong>When:</strong> {{.When}}</p>
+<p style="margin:0 0 4px"><strong>With:</strong> {{.HostName}} and {{.GuestName}}</p>
+<p style="margin:16px 0 0;color:#888;font-size:13px">Cancelled by the {{.CancelledBy}}.</p>
+</td></tr>
+</table>
+</body></html>`
+
 // BuildICS produces a minimal RFC 5545 VEVENT. We keep it static — no
 // VTIMEZONE block — by emitting DTSTART/DTEND in UTC. Calendar apps render
 // the local time from the absolute timestamp, so "9am NY" still shows as
@@ -180,9 +234,12 @@ func joinURL(base, path string) string {
 
 func addressLine(name, email string) string {
 	if name == "" {
-		return email
+		return sanitizeHeaderValue(email)
 	}
-	return fmt.Sprintf("%s <%s>", name, email)
+	return (&mail.Address{
+		Name:    sanitizeHeaderValue(name),
+		Address: sanitizeHeaderValue(email),
+	}).String()
 }
 
 func renderHTML(vars map[string]string, template string) string {

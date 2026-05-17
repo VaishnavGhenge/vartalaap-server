@@ -65,10 +65,16 @@ func BookingHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, deps B
 		}
 		switch r.Method {
 		case http.MethodOptions:
+			// Pre-flight covers both GET and DELETE — the browser sends one
+			// OPTIONS per actual method, so advertising both keeps the
+			// dashboard cancel path from being blocked by CORS.
 			bookingsRoute(cfg, http.MethodGet, nil,
 				func(w http.ResponseWriter, r *http.Request) {})(w, r)
 		case http.MethodGet:
 			bookingsRoute(cfg, http.MethodGet, publicLim, handleGetBooking(st, id))(w, r)
+		case http.MethodDelete:
+			bookingsRoute(cfg, http.MethodDelete, hostLim,
+				RequireAuth(cfg.JWTSecret, handleHostCancelBooking(st, deps, id)))(w, r)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -303,6 +309,96 @@ func sendBookingEmails(ctx context.Context, deps BookingDeps, b *store.Booking, 
 	}
 	if err := deps.Mailer.Send(sendCtx, email.RenderBookingNotification(in, "")); err != nil {
 		slog.Warn("bookings: host email failed", "err", err, "booking_id", b.ID)
+	}
+}
+
+// handleHostCancelBooking soft-cancels a booking the authed host owns. We
+// scope by host_id rather than just bookingID so a token leak can't be used
+// to cancel another host's bookings via a known UUID. Returns 204 on success,
+// 404 for both "doesn't exist" and "exists but belongs to someone else" — same
+// reasoning as resolveBookingTarget.
+func handleHostCancelBooking(st store.Storer, deps BookingDeps, id string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := auth.UserIDFromContext(r.Context())
+		if !ok {
+			WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "unauthorized")
+			return
+		}
+		b, err := st.GetBookingByID(r.Context(), id)
+		if err != nil || b.HostID != userID {
+			WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
+			return
+		}
+		if b.Status == "cancelled" {
+			// Idempotent: a re-cancel is success, not 404.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if err := st.CancelBooking(r.Context(), b.ID); err != nil {
+			slog.Error("bookings: host cancel", "err", err, "booking_id", b.ID, "user_id", userID)
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not cancel")
+			return
+		}
+		host, _ := st.GetUserByID(r.Context(), b.HostID)
+		event, _ := st.GetEventType(r.Context(), b.HostID, b.EventTypeID)
+		sendCancellationEmails(r.Context(), deps, b, event, host, "host")
+		slog.Info("bookings: host cancelled", "booking_id", b.ID, "user_id", userID)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleGuestCancelBooking is the unauthed counterpart, looked up by meet
+// code. Knowing the meet code is the same trust model the booking
+// confirmation page uses; an attacker without the code can't enumerate
+// (codes are 32^10 ≈ 10^15).
+func handleGuestCancelBooking(st store.Storer, deps BookingDeps, code string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b, err := st.GetBookingByMeetCode(r.Context(), code)
+		if err != nil {
+			WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
+			return
+		}
+		if b.Status == "cancelled" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if err := st.CancelBooking(r.Context(), b.ID); err != nil {
+			slog.Error("bookings: guest cancel", "err", err, "booking_id", b.ID)
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not cancel")
+			return
+		}
+		host, _ := st.GetUserByID(r.Context(), b.HostID)
+		event, _ := st.GetEventType(r.Context(), b.HostID, b.EventTypeID)
+		sendCancellationEmails(r.Context(), deps, b, event, host, "guest")
+		slog.Info("bookings: guest cancelled", "booking_id", b.ID, "meet_code", code)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// sendCancellationEmails notifies both parties. `cancelledBy` is "host" or
+// "guest" — used only in the subject/body so each party reads the right
+// framing ("X cancelled" vs "you cancelled").
+func sendCancellationEmails(ctx context.Context, deps BookingDeps, b *store.Booking, event *store.EventType, host *store.User, cancelledBy string) {
+	if deps.Mailer == nil || event == nil || host == nil {
+		return
+	}
+	in := email.BookingInput{
+		GuestName:    b.GuestName,
+		GuestEmail:   b.GuestEmail,
+		HostName:     host.Name,
+		HostEmail:    host.Email,
+		HostTimezone: host.Timezone,
+		EventTitle:   event.Title,
+		EventMinutes: event.DurationMin,
+		StartsAt:     b.StartsAt,
+		EndsAt:       b.EndsAt,
+		MeetCode:     b.MeetCode,
+		PublicAppURL: deps.PublicAppURL,
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	if err := deps.Mailer.Send(sendCtx, email.RenderBookingCancellation(in, "", cancelledBy)); err != nil {
+		slog.Warn("bookings: cancellation email failed", "err", err, "booking_id", b.ID)
 	}
 }
 

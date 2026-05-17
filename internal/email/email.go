@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/mail"
 	"net/smtp"
 	"os"
 	"strings"
@@ -187,12 +188,15 @@ func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
 // addressOnly strips a display-name wrapper from an address line. Net/smtp's
 // Mail/Rcpt expect a bare addr-spec, not "Name <foo@bar>".
 func addressOnly(s string) string {
+	if addr, err := mail.ParseAddress(sanitizeHeaderValue(s)); err == nil {
+		return addr.Address
+	}
 	if i := strings.LastIndex(s, "<"); i >= 0 {
 		if j := strings.LastIndex(s, ">"); j > i {
-			return strings.TrimSpace(s[i+1 : j])
+			return sanitizeHeaderValue(s[i+1 : j])
 		}
 	}
-	return strings.TrimSpace(s)
+	return sanitizeHeaderValue(s)
 }
 
 func atoiOr(s string, def int) int {

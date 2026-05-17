@@ -27,8 +27,9 @@ const maxSlotsRangeDays = 62
 //
 // Go 1.22 path patterns aren't in use elsewhere in this codebase yet, so we
 // parse manually to match the existing style in booking_handler.go.
-func SlotHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig) {
+func SlotHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, deps BookingDeps) {
 	lim := NewRateLimiter(60, 120)
+	cancelLim := NewRateLimiter(10, 20)
 
 	mux.HandleFunc("/u/", func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/u/"), "/")
@@ -67,7 +68,20 @@ func SlotHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		route(w, r, cfg, lim, handleGetBookingByMeetCode(st, code))
+		switch r.Method {
+		case http.MethodOptions:
+			bookingsRoute(cfg, http.MethodGet, nil,
+				func(w http.ResponseWriter, r *http.Request) {})(w, r)
+		case http.MethodGet:
+			bookingsRoute(cfg, http.MethodGet, lim, handleGetBookingByMeetCode(st, code))(w, r)
+		case http.MethodDelete:
+			// Guest-side cancel. Tighter rate limit because this is the one
+			// public mutation we expose under a meet-code-based auth model.
+			bookingsRoute(cfg, http.MethodDelete, cancelLim,
+				handleGuestCancelBooking(st, deps, code))(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 	})
 }
 
