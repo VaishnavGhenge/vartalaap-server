@@ -111,6 +111,10 @@ type createBookingRequest struct {
 	StartsAt      string `json:"startsAt"`
 	GuestName     string `json:"guestName"`
 	GuestEmail    string `json:"guestEmail"`
+	// HoldToken is optional. When present, the conflict checks ignore any
+	// hold with this token (so a guest's own held slot doesn't block their
+	// own submit) and the hold is consumed on success.
+	HoldToken     string `json:"holdToken,omitempty"`
 }
 
 type bookingDTO struct {
@@ -213,6 +217,18 @@ func handleCreateBooking(st store.Storer, deps BookingDeps) http.HandlerFunc {
 			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not create booking")
 			return
 		}
+		// Hold collisions on the same host (cross-event). The guest's own
+		// hold (if any) is exempt via ignoreToken so they don't 409 against
+		// themselves.
+		if cerr := checkHoldConflict(r.Context(), st, host.ID, *event, startsAt.UTC(), endsAt.UTC(), req.HoldToken); cerr != nil {
+			if errors.Is(cerr, errSlotTaken) {
+				WriteError(w, http.StatusConflict, "SLOT_TAKEN", "this slot is being booked by someone else")
+				return
+			}
+			slog.Error("bookings: hold-conflict check", "err", cerr, "host_id", host.ID)
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not create booking")
+			return
+		}
 
 		// Free-plan cap. CountBookingsInMonth uses created_at (this month's
 		// quota counts bookings *taken* this month, not sessions delivered).
@@ -272,6 +288,15 @@ func handleCreateBooking(st store.Storer, deps BookingDeps) http.HandlerFunc {
 		slog.Info("bookings: created",
 			"booking_id", created.ID, "host_id", host.ID, "event_id", event.ID,
 			"starts_at", created.StartsAt, "guest_email", guestEmail)
+
+		// Consume the hold (if any) so the row isn't left blocking other
+		// pickers until its TTL. DeleteSlotHold is idempotent so a missing
+		// or already-released hold is fine.
+		if req.HoldToken != "" {
+			if err := st.DeleteSlotHold(r.Context(), req.HoldToken); err != nil {
+				slog.Warn("bookings: hold release failed", "err", err, "booking_id", created.ID)
+			}
+		}
 
 		sendBookingEmails(r.Context(), deps, created, event, host, guestName, guestEmail)
 

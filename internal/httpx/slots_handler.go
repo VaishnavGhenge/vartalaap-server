@@ -273,7 +273,17 @@ func handleListSlots(st store.Storer, hostSlug, eventSlug string) http.HandlerFu
 			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not load slots")
 			return
 		}
-		slots := generateSlots(rules, *event, bookings, fromUTC, toUTC, time.Now().UTC())
+		// Active holds (any event type on this host) — treat them as if they
+		// were bookings so a slot in-progress disappears from every picker
+		// the moment another guest taps it.
+		holds, err := st.ListActiveHoldsForHostInRange(r.Context(), host.ID, fromUTC, toUTC)
+		if err != nil {
+			slog.Error("slots: list holds", "err", err, "host_id", host.ID)
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not load slots")
+			return
+		}
+		blockers := mergeBookingsAndHolds(bookings, holds)
+		slots := generateSlots(rules, *event, blockers, fromUTC, toUTC, time.Now().UTC())
 
 		out := slotsResponse{
 			EventTypeID:  event.ID,
@@ -466,3 +476,49 @@ func checkBookingConflict(ctx context.Context, st store.Storer, event store.Even
 }
 
 var errSlotTaken = errors.New("slot already taken")
+
+// mergeBookingsAndHolds converts active holds into booking-shaped intervals
+// so generateSlots can apply the same buffer + overlap logic uniformly.
+// Status is set to "held" purely for debuggability; the conflict math only
+// looks at StartsAt/EndsAt.
+func mergeBookingsAndHolds(bookings []store.Booking, holds []store.SlotHold) []store.Booking {
+	out := make([]store.Booking, 0, len(bookings)+len(holds))
+	out = append(out, bookings...)
+	for _, h := range holds {
+		out = append(out, store.Booking{
+			EventTypeID: h.EventTypeID,
+			HostID:      h.HostID,
+			StartsAt:    h.StartsAt,
+			EndsAt:      h.EndsAt,
+			Status:      "held",
+		})
+	}
+	return out
+}
+
+// checkHoldConflict returns errSlotTaken when any active hold on the same
+// host overlaps [startsAt, endsAt] (buffer included). `ignoreToken` lets the
+// caller skip a specific hold — used by POST /bookings when the guest is
+// converting their own hold into a booking.
+func checkHoldConflict(ctx context.Context, st store.Storer, hostID string, event store.EventType, startsAt, endsAt time.Time, ignoreToken string) error {
+	buffer := time.Duration(event.BufferMin) * time.Minute
+	holds, err := st.ListActiveHoldsForHostInRange(ctx, hostID,
+		startsAt.Add(-buffer), endsAt.Add(buffer))
+	if err != nil {
+		return err
+	}
+	// Convert to the booking-shape isSlotConflicted expects.
+	asBookings := make([]store.Booking, 0, len(holds))
+	for _, h := range holds {
+		if ignoreToken != "" && h.Token == ignoreToken {
+			continue
+		}
+		asBookings = append(asBookings, store.Booking{
+			StartsAt: h.StartsAt, EndsAt: h.EndsAt,
+		})
+	}
+	if isSlotConflicted(startsAt, endsAt.Sub(startsAt), buffer, asBookings) {
+		return errSlotTaken
+	}
+	return nil
+}

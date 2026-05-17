@@ -113,10 +113,12 @@ func main() {
 		httpx.MeHandlers(mux, st, authCfg)
 		httpx.BookingHandlers(mux, st, authCfg, bookingDeps)
 		httpx.SlotHandlers(mux, st, authCfg, bookingDeps)
+		httpx.HoldHandlers(mux, st, authCfg)
 		log.Println("Auth endpoints enabled")
 		log.Println("Scheduling endpoints enabled: /me/availability, /me/event-types")
 		log.Println("Booking endpoints enabled: /bookings, /me/bookings")
 		log.Println("Public slot endpoint enabled: /u/{slug}/{event}/slots")
+		log.Println("Slot-hold endpoints enabled: /holds, /holds/{token}")
 	} else {
 		log.Println("WARN: Auth endpoints disabled (missing DATABASE_URL or JWT_SECRET)")
 	}

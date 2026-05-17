@@ -25,10 +25,12 @@ type memStore struct {
 	avail  map[string][]store.AvailabilityRule // hostID -> rules
 	events map[string]*store.EventType // key: event id
 	bookings map[string]*store.Booking // key: booking id
+	holds  map[string]*store.SlotHold  // key: hold token
 	nextID int
 	nextAvailID int
 	nextEventID int
 	nextBookingID int
+	nextHoldID int
 }
 
 func newMemStore() *memStore {
@@ -39,6 +41,7 @@ func newMemStore() *memStore {
 		avail:   make(map[string][]store.AvailabilityRule),
 		events:   make(map[string]*store.EventType),
 		bookings: make(map[string]*store.Booking),
+		holds:    make(map[string]*store.SlotHold),
 	}
 }
 
@@ -421,6 +424,60 @@ func (m *memStore) CountBookingsInMonth(_ context.Context, hostID string, year i
 		n++
 	}
 	return n, nil
+}
+
+func (m *memStore) CreateSlotHold(_ context.Context, h store.SlotHold) (*store.SlotHold, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.holds[h.Token]; exists {
+		return nil, store.ErrConflict
+	}
+	m.nextHoldID++
+	stored := h
+	stored.ID = fmt.Sprintf("hold-%d", m.nextHoldID)
+	stored.CreatedAt = time.Now().UTC()
+	m.holds[h.Token] = &stored
+	return &stored, nil
+}
+
+func (m *memStore) GetSlotHoldByToken(_ context.Context, token string) (*store.SlotHold, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	h, ok := m.holds[token]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *h
+	return &cp, nil
+}
+
+func (m *memStore) DeleteSlotHold(_ context.Context, token string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.holds, token)
+	return nil
+}
+
+func (m *memStore) ListActiveHoldsForHostInRange(_ context.Context, hostID string, fromUTC, toUTC time.Time) ([]store.SlotHold, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now().UTC()
+	var out []store.SlotHold
+	for _, h := range m.holds {
+		if h.HostID != hostID {
+			continue
+		}
+		if !h.ExpiresAt.After(now) {
+			continue
+		}
+		// Half-open overlap [from, to) ∩ [starts, ends).
+		if !h.StartsAt.Before(toUTC) || !h.EndsAt.After(fromUTC) {
+			continue
+		}
+		cp := *h
+		out = append(out, cp)
+	}
+	return out, nil
 }
 
 // --- test helpers ---

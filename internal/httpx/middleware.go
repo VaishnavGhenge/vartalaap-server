@@ -139,7 +139,7 @@ func routeLabel(path string) string {
 	case "/", "/healthz", "/metrics", "/stats", "/dashboard",
 		"/ws", "/meets/new", "/ice-servers",
 		"/auth/register", "/auth/login", "/auth/refresh", "/auth/logout", "/auth/me",
-		"/me/availability", "/me/event-types", "/me/bookings", "/bookings":
+		"/me/availability", "/me/event-types", "/me/bookings", "/bookings", "/holds":
 		return path
 	}
 	// /me/event-types/{id} — normalise the ID out of the label.
@@ -148,6 +148,9 @@ func routeLabel(path string) string {
 	}
 	if strings.HasPrefix(path, "/bookings/") {
 		return "/bookings/:id"
+	}
+	if strings.HasPrefix(path, "/holds/") {
+		return "/holds/:token"
 	}
 	// /u/{slug}[/{event}[/slots]] — public host/profile/slot routes.
 	if strings.HasPrefix(path, "/u/") {

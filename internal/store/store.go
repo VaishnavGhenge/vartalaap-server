@@ -46,6 +46,14 @@ type Storer interface {
 	ListBookingsForEventInRange(ctx context.Context, eventTypeID string, fromUTC, toUTC time.Time) ([]Booking, error)
 	CancelBooking(ctx context.Context, id string) error
 	CountBookingsInMonth(ctx context.Context, hostID string, year int, month time.Month) (int, error)
+
+	// Slot holds: short-lived reservations created when a guest taps a slot
+	// in the picker, released on submit/abandon/TTL. Scoped by host (not
+	// event_type) so a host's separate event types share calendar time.
+	CreateSlotHold(ctx context.Context, h SlotHold) (*SlotHold, error)
+	GetSlotHoldByToken(ctx context.Context, token string) (*SlotHold, error)
+	DeleteSlotHold(ctx context.Context, token string) error
+	ListActiveHoldsForHostInRange(ctx context.Context, hostID string, fromUTC, toUTC time.Time) ([]SlotHold, error)
 }
 
 type User struct {
@@ -97,6 +105,21 @@ type Booking struct {
 	Status          string  // "pending_payment" | "confirmed" | "cancelled" | "completed"
 	StripeSessionID *string
 	CreatedAt       time.Time
+}
+
+// SlotHold is a short-lived reservation while a guest fills out the booking
+// form. Token is the opaque identifier returned to the client; DeleteSlotHold
+// and the consume-on-create path both look up by token rather than ID so the
+// internal UUID never has to leak.
+type SlotHold struct {
+	ID          string
+	HostID      string
+	EventTypeID string
+	StartsAt    time.Time
+	EndsAt      time.Time
+	Token       string
+	ExpiresAt   time.Time
+	CreatedAt   time.Time
 }
 
 // AvailabilityRule is one recurring weekly slot during which a host is bookable.
@@ -677,6 +700,95 @@ func (s *Store) CancelBooking(ctx context.Context, id string) error {
 // guest could otherwise spam-then-cancel to bypass the cap.
 //
 // month is the time.Month value (1-12).
+// CreateSlotHold inserts a fresh hold. The caller decides the TTL by setting
+// ExpiresAt; we don't enforce a maximum because the public POST /holds
+// endpoint is the one place that should set it, and that decision lives in
+// the handler.
+func (s *Store) CreateSlotHold(ctx context.Context, h SlotHold) (*SlotHold, error) {
+	var out SlotHold
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO slot_holds (host_id, event_type_id, starts_at, ends_at, hold_token, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, host_id, event_type_id, starts_at, ends_at, hold_token, expires_at, created_at`,
+		h.HostID, h.EventTypeID, h.StartsAt, h.EndsAt, h.Token, h.ExpiresAt,
+	).Scan(
+		&out.ID, &out.HostID, &out.EventTypeID, &out.StartsAt, &out.EndsAt,
+		&out.Token, &out.ExpiresAt, &out.CreatedAt,
+	)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return nil, ErrConflict
+		}
+		return nil, fmt.Errorf("store: create slot hold: %w", err)
+	}
+	return &out, nil
+}
+
+func (s *Store) GetSlotHoldByToken(ctx context.Context, token string) (*SlotHold, error) {
+	var out SlotHold
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, host_id, event_type_id, starts_at, ends_at, hold_token, expires_at, created_at
+		FROM slot_holds WHERE hold_token = $1`,
+		token,
+	).Scan(
+		&out.ID, &out.HostID, &out.EventTypeID, &out.StartsAt, &out.EndsAt,
+		&out.Token, &out.ExpiresAt, &out.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: get slot hold: %w", err)
+	}
+	return &out, nil
+}
+
+// DeleteSlotHold removes the row outright. Holds are ephemeral and not
+// referenced by anything else, so there's no soft-delete semantics needed —
+// once the guest releases (or the booking consumes it), the row is gone.
+// Returns nil even if the token doesn't exist; the caller has no business
+// distinguishing "already released" from "never existed".
+func (s *Store) DeleteSlotHold(ctx context.Context, token string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM slot_holds WHERE hold_token = $1`, token)
+	if err != nil {
+		return fmt.Errorf("store: delete slot hold: %w", err)
+	}
+	return nil
+}
+
+// ListActiveHoldsForHostInRange returns every non-expired hold for a host
+// whose window overlaps [fromUTC, toUTC). Used by the slot generator to
+// treat in-progress reservations as if they were already bookings — cross-
+// event because a host can't be in two sessions at once.
+func (s *Store) ListActiveHoldsForHostInRange(ctx context.Context, hostID string, fromUTC, toUTC time.Time) ([]SlotHold, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, host_id, event_type_id, starts_at, ends_at, hold_token, expires_at, created_at
+		FROM slot_holds
+		WHERE host_id = $1
+		  AND expires_at > now()
+		  AND starts_at < $3 AND ends_at > $2
+		ORDER BY starts_at`,
+		hostID, fromUTC, toUTC,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: list slot holds: %w", err)
+	}
+	defer rows.Close()
+	var out []SlotHold
+	for rows.Next() {
+		var h SlotHold
+		if err := rows.Scan(
+			&h.ID, &h.HostID, &h.EventTypeID, &h.StartsAt, &h.EndsAt,
+			&h.Token, &h.ExpiresAt, &h.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("store: scan slot hold: %w", err)
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) CountBookingsInMonth(ctx context.Context, hostID string, year int, month time.Month) (int, error) {
 	// Calendar month boundaries in UTC. Using created_at (not starts_at) so
 	// "a booking taken this month" semantics match the user's expectation —
