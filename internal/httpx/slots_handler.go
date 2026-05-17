@@ -16,41 +16,191 @@ import (
 // the table. Two months is enough for any reasonable booking UI scrollback.
 const maxSlotsRangeDays = 62
 
-// SlotHandlers wires the public slot-listing endpoint. Mounted alongside
-// BookingHandlers because they share the same security model (public, but
-// origin + rate limited).
+// SlotHandlers wires the public host-facing endpoints under /u/ and the
+// confirmation lookup under /m/. Mounted alongside BookingHandlers because
+// they share the same security model (public, origin + rate limited).
+//
+//	GET /u/{slug}                        → host profile + active event types
+//	GET /u/{slug}/{event}                → host + single event details
+//	GET /u/{slug}/{event}/slots?from=…   → bookable slots in range
+//	GET /m/{code}                        → resolve booking by meet code
+//
+// Go 1.22 path patterns aren't in use elsewhere in this codebase yet, so we
+// parse manually to match the existing style in booking_handler.go.
 func SlotHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig) {
 	lim := NewRateLimiter(60, 120)
 
-	// Path shape: /u/{hostSlug}/{eventSlug}/slots — no Go 1.22 patterns yet in
-	// this codebase, so we parse manually. The mux registers the prefix and
-	// the handler validates the rest of the segments.
 	mux.HandleFunc("/u/", func(w http.ResponseWriter, r *http.Request) {
-		// Only the slot subroute lives here for now; the public profile pages
-		// land in S4 and will own /u/{slug} and /u/{slug}/{event} directly.
-		// Other paths under /u/ return 404 so the prefix doesn't accidentally
-		// swallow future routes.
-		if !strings.HasSuffix(r.URL.Path, "/slots") {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/u/"), "/")
-		// Expect [hostSlug, eventSlug, "slots"].
-		if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] != "slots" {
+		// Strip a trailing empty segment so /u/foo/ behaves like /u/foo.
+		if n := len(parts); n > 0 && parts[n-1] == "" {
+			parts = parts[:n-1]
+		}
+		if len(parts) == 0 || parts[0] == "" {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		hostSlug, eventSlug := parts[0], parts[1]
-		switch r.Method {
-		case http.MethodOptions:
-			bookingsRoute(cfg, http.MethodGet, nil,
-				func(w http.ResponseWriter, r *http.Request) {})(w, r)
-		case http.MethodGet:
-			bookingsRoute(cfg, http.MethodGet, lim, handleListSlots(st, hostSlug, eventSlug))(w, r)
+		hostSlug := parts[0]
+		switch len(parts) {
+		case 1:
+			route(w, r, cfg, lim, handleGetHostProfile(st, hostSlug))
+		case 2:
+			if parts[1] == "" {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			route(w, r, cfg, lim, handleGetPublicEvent(st, hostSlug, parts[1]))
+		case 3:
+			if parts[1] == "" || parts[2] != "slots" {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			route(w, r, cfg, lim, handleListSlots(st, hostSlug, parts[1]))
 		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, "not found", http.StatusNotFound)
 		}
 	})
+
+	mux.HandleFunc("/m/", func(w http.ResponseWriter, r *http.Request) {
+		code := strings.TrimPrefix(r.URL.Path, "/m/")
+		if code == "" || strings.Contains(code, "/") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		route(w, r, cfg, lim, handleGetBookingByMeetCode(st, code))
+	})
+}
+
+// route applies the standard OPTIONS+GET handling for public /u/ and /m/
+// endpoints so each sub-handler doesn't repeat the switch.
+func route(w http.ResponseWriter, r *http.Request, cfg AuthConfig, lim *RateLimiter, h http.HandlerFunc) {
+	switch r.Method {
+	case http.MethodOptions:
+		bookingsRoute(cfg, http.MethodGet, nil,
+			func(w http.ResponseWriter, r *http.Request) {})(w, r)
+	case http.MethodGet:
+		bookingsRoute(cfg, http.MethodGet, lim, h)(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ─── Public DTOs ──────────────────────────────────────────────────────────────
+
+type publicEventDTO struct {
+	ID          string `json:"id"`
+	Slug        string `json:"slug"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	DurationMin int    `json:"durationMin"`
+	IsPaid      bool   `json:"isPaid"`
+}
+
+type hostProfileResponse struct {
+	Name       string           `json:"name"`
+	Slug       string           `json:"slug"`
+	Timezone   string           `json:"timezone"`
+	EventTypes []publicEventDTO `json:"eventTypes"`
+}
+
+type publicEventResponse struct {
+	Host  hostProfileMini `json:"host"`
+	Event publicEventDTO  `json:"event"`
+}
+
+type hostProfileMini struct {
+	Name     string `json:"name"`
+	Slug     string `json:"slug"`
+	Timezone string `json:"timezone"`
+}
+
+func toPublicEventDTO(e store.EventType) publicEventDTO {
+	dto := publicEventDTO{
+		ID:          e.ID,
+		Slug:        e.Slug,
+		Title:       e.Title,
+		DurationMin: e.DurationMin,
+		IsPaid:      e.IsPaid,
+	}
+	if e.Description != nil {
+		dto.Description = *e.Description
+	}
+	return dto
+}
+
+// handleGetHostProfile serves GET /u/{slug}. Returns the host's public
+// profile + their active event types. 404 when the host doesn't exist —
+// same response shape as a real "no such page" to keep slug enumeration
+// no more useful than guessing.
+func handleGetHostProfile(st store.Storer, hostSlug string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		host, err := st.GetUserBySlug(r.Context(), hostSlug)
+		if err != nil {
+			WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
+			return
+		}
+		events, err := st.ListEventTypes(r.Context(), host.ID, true)
+		if err != nil {
+			slog.Error("public: list event types", "err", err, "host_id", host.ID)
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not load profile")
+			return
+		}
+		out := hostProfileResponse{
+			Name:       host.Name,
+			Slug:       host.Slug,
+			Timezone:   host.Timezone,
+			EventTypes: make([]publicEventDTO, 0, len(events)),
+		}
+		for _, e := range events {
+			out.EventTypes = append(out.EventTypes, toPublicEventDTO(e))
+		}
+		WriteJSON(w, http.StatusOK, out)
+	}
+}
+
+// handleGetPublicEvent serves GET /u/{slug}/{event}. Returns the metadata
+// the booking-form page needs (host name/tz + event title/duration). The
+// slot list is a separate call so the booking page can refetch slots when
+// the date range changes without re-hitting the metadata route.
+func handleGetPublicEvent(st store.Storer, hostSlug, eventSlug string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		host, event, err := resolveBookingTarget(r.Context(), st, hostSlug, eventSlug)
+		if err != nil {
+			WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
+			return
+		}
+		if !event.IsActive {
+			WriteError(w, http.StatusNotFound, "EVENT_INACTIVE", "event is no longer available")
+			return
+		}
+		WriteJSON(w, http.StatusOK, publicEventResponse{
+			Host: hostProfileMini{
+				Name: host.Name, Slug: host.Slug, Timezone: host.Timezone,
+			},
+			Event: toPublicEventDTO(*event),
+		})
+	}
+}
+
+// handleGetBookingByMeetCode serves GET /m/{code} — the public confirmation
+// page reads here to show "you're booked with X at Y". The response is
+// deliberately narrow: only what the guest already knows or needs to display.
+func handleGetBookingByMeetCode(st store.Storer, code string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b, err := st.GetBookingByMeetCode(r.Context(), code)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
+				return
+			}
+			slog.Error("m: get booking", "err", err, "code", code)
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not load booking")
+			return
+		}
+		event, _ := st.GetEventType(r.Context(), b.HostID, b.EventTypeID)
+		host, _ := st.GetUserByID(r.Context(), b.HostID)
+		WriteJSON(w, http.StatusOK, toBookingDTO(*b, event, host))
+	}
 }
 
 type slotsResponse struct {

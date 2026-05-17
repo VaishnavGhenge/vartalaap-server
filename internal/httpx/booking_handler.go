@@ -180,6 +180,19 @@ func handleCreateBooking(st store.Storer) http.HandlerFunc {
 		}
 		endsAt := startsAt.Add(time.Duration(event.DurationMin) * time.Minute)
 
+		// Reject slot collisions before we burn a meet-code generation
+		// attempt. The same predicate is used by /slots so the picker and
+		// the create call agree on which times are taken.
+		if cerr := checkBookingConflict(r.Context(), st, *event, startsAt.UTC(), endsAt.UTC()); cerr != nil {
+			if errors.Is(cerr, errSlotTaken) {
+				WriteError(w, http.StatusConflict, "SLOT_TAKEN", "this slot is no longer available")
+				return
+			}
+			slog.Error("bookings: conflict check", "err", cerr, "host_id", host.ID, "event_id", event.ID)
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not create booking")
+			return
+		}
+
 		// Free-plan cap. CountBookingsInMonth uses created_at (this month's
 		// quota counts bookings *taken* this month, not sessions delivered).
 		if host.Plan == "free" {

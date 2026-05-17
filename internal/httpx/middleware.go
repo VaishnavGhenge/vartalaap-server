@@ -149,6 +149,26 @@ func routeLabel(path string) string {
 	if strings.HasPrefix(path, "/bookings/") {
 		return "/bookings/:id"
 	}
+	// /u/{slug}[/{event}[/slots]] — public host/profile/slot routes.
+	if strings.HasPrefix(path, "/u/") {
+		tail := strings.TrimPrefix(path, "/u/")
+		parts := strings.Split(tail, "/")
+		switch len(parts) {
+		case 1:
+			return "/u/:slug"
+		case 2:
+			return "/u/:slug/:event"
+		case 3:
+			if parts[2] == "slots" {
+				return "/u/:slug/:event/slots"
+			}
+		}
+		return "/other"
+	}
+	// /m/{code} — public meet-code lookup for the confirmation page.
+	if strings.HasPrefix(path, "/m/") {
+		return "/m/:code"
+	}
 	// /sfu/sessions/* — normalize session ID and sub-route.
 	if strings.HasPrefix(path, "/sfu/sessions/") {
 		tail := strings.TrimPrefix(path, "/sfu/sessions/")
