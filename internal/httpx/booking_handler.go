@@ -9,8 +9,18 @@ import (
 	"time"
 
 	"github.com/vaishnavghenge/vartalaap-server/internal/auth"
+	"github.com/vaishnavghenge/vartalaap-server/internal/email"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
+
+// BookingDeps bundles the cross-cutting collaborators booking handlers need
+// alongside the Storer. Keeping these in one struct stops the handler
+// signatures from sprouting positional parameters every time the booking
+// flow grows a new side effect.
+type BookingDeps struct {
+	Mailer       email.Mailer
+	PublicAppURL string
+}
 
 // freePlanMonthlyBookingLimit caps the bookings a free-tier host can take in a
 // calendar month. The roadmap names this number explicitly; codifying it as a
@@ -26,9 +36,14 @@ const meetCodeCollisionRetries = 5
 // BookingHandlers wires the public booking surface and the host's own
 // bookings list. Public routes (POST /bookings, GET /bookings/{id}) accept
 // guests with no account; /me/bookings sits behind auth.
-func BookingHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig) {
+func BookingHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, deps BookingDeps) {
 	publicLim := NewRateLimiter(20, 40)
 	hostLim := NewRateLimiter(30, 60)
+	if deps.Mailer == nil {
+		// Default keeps callers tidy in tests and ensures we never panic on
+		// a missing dep — a misconfigured prod env logs instead of crashing.
+		deps.Mailer = &email.LogMailer{}
+	}
 
 	mux.HandleFunc("/bookings", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -36,7 +51,7 @@ func BookingHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig) {
 			bookingsRoute(cfg, http.MethodPost, nil,
 				func(w http.ResponseWriter, r *http.Request) {})(w, r)
 		case http.MethodPost:
-			bookingsRoute(cfg, http.MethodPost, publicLim, handleCreateBooking(st))(w, r)
+			bookingsRoute(cfg, http.MethodPost, publicLim, handleCreateBooking(st, deps))(w, r)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -135,7 +150,7 @@ func toBookingDTO(b store.Booking, event *store.EventType, host *store.User) boo
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
-func handleCreateBooking(st store.Storer) http.HandlerFunc {
+func handleCreateBooking(st store.Storer, deps BookingDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req createBookingRequest
 		if err := BindJSON(r, &req); err != nil {
@@ -251,7 +266,43 @@ func handleCreateBooking(st store.Storer) http.HandlerFunc {
 		slog.Info("bookings: created",
 			"booking_id", created.ID, "host_id", host.ID, "event_id", event.ID,
 			"starts_at", created.StartsAt, "guest_email", guestEmail)
+
+		sendBookingEmails(r.Context(), deps, created, event, host, guestName, guestEmail)
+
 		WriteJSON(w, http.StatusCreated, toBookingDTO(*created, event, host))
+	}
+}
+
+// sendBookingEmails fires the guest + host confirmations. Errors are logged
+// but never surfaced to the caller — the booking has already been persisted,
+// and a failed email is a recoverable miss (the guest still has the meet
+// code in the response, the host can re-fetch from /me/bookings). The
+// 6-second context cap is enough for two SMTP round-trips on any healthy
+// provider while keeping the request from hanging on a stuck one.
+func sendBookingEmails(ctx context.Context, deps BookingDeps, b *store.Booking, event *store.EventType, host *store.User, guestName, guestEmail string) {
+	if deps.Mailer == nil {
+		return
+	}
+	in := email.BookingInput{
+		GuestName:    guestName,
+		GuestEmail:   guestEmail,
+		HostName:     host.Name,
+		HostEmail:    host.Email,
+		HostTimezone: host.Timezone,
+		EventTitle:   event.Title,
+		EventMinutes: event.DurationMin,
+		StartsAt:     b.StartsAt,
+		EndsAt:       b.EndsAt,
+		MeetCode:     b.MeetCode,
+		PublicAppURL: deps.PublicAppURL,
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	if err := deps.Mailer.Send(sendCtx, email.RenderBookingConfirmation(in, "")); err != nil {
+		slog.Warn("bookings: guest email failed", "err", err, "booking_id", b.ID)
+	}
+	if err := deps.Mailer.Send(sendCtx, email.RenderBookingNotification(in, "")); err != nil {
+		slog.Warn("bookings: host email failed", "err", err, "booking_id", b.ID)
 	}
 }
 

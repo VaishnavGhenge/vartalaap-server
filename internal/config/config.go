@@ -19,6 +19,11 @@ type Config struct {
 	JWTSecret       string
 	AccessTokenTTL  time.Duration
 	SecureCookie    bool
+	// PublicAppURL is the canonical base URL the booking surface lives at —
+	// used to build absolute room/confirmation links in transactional emails.
+	// Falls back to the first AllowedOrigins entry so dev environments work
+	// without extra wiring.
+	PublicAppURL string
 }
 
 func Load() Config {
@@ -34,6 +39,10 @@ func Load() Config {
 		JWTSecret:       os.Getenv("JWT_SECRET"),
 		AccessTokenTTL:  parseDuration(getenv("JWT_ACCESS_TTL", "15m")),
 		SecureCookie:    os.Getenv("SECURE_COOKIE") == "true",
+		PublicAppURL:    os.Getenv("PUBLIC_APP_URL"),
+	}
+	if cfg.PublicAppURL == "" && len(cfg.AllowedOrigins) > 0 {
+		cfg.PublicAppURL = cfg.AllowedOrigins[0]
 	}
 	if cfg.CFTurnKeyID == "" || cfg.CFTurnAPIToken == "" {
 		log.Println("WARN: CF_TURN_KEY_ID / CF_TURN_API_TOKEN not set — /ice-servers will fail")

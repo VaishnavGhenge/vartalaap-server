@@ -64,7 +64,7 @@ func futureRFC3339(minutesFromNow int) string {
 // avoids spinning up a full mux for handler-layer tests.
 func dispatchBookings(st store.Storer, w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/bookings" && r.Method == http.MethodPost {
-		handleCreateBooking(st)(w, r)
+		handleCreateBooking(st, BookingDeps{})(w, r)
 		return
 	}
 	if r.URL.Path == "/me/bookings" && r.Method == http.MethodGet {

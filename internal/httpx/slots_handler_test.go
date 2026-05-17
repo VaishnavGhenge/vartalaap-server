@@ -8,11 +8,39 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/vaishnavghenge/vartalaap-server/internal/email"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
+
+// recordingMailer captures every Send for assertion in booking-email tests.
+// Thread-safe so multiple concurrent bookings (if a test ever exercises that)
+// don't tear the recorded slice.
+type recordingMailer struct {
+	mu   sync.Mutex
+	sent []email.Message
+	err  error // when non-nil, returned from every Send to simulate failure
+}
+
+func (r *recordingMailer) Send(_ context.Context, msg email.Message) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return r.err
+	}
+	r.sent = append(r.sent, msg)
+	return nil
+}
+func (r *recordingMailer) Messages() []email.Message {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]email.Message, len(r.sent))
+	copy(out, r.sent)
+	return out
+}
 
 // dispatchPublic mirrors dispatchBookings — exposes the public /u/ and /m/
 // handlers under a thin router so individual tests stay focused on the
@@ -326,6 +354,63 @@ func TestCreateBooking_RejectsExactDoubleBook(t *testing.T) {
 	}
 	if !strings.Contains(rec2.Body.String(), "SLOT_TAKEN") {
 		t.Fatalf("expected SLOT_TAKEN code, got %q", rec2.Body.String())
+	}
+}
+
+// ─── Email side effects on booking creation ──────────────────────────────────
+
+func TestCreateBooking_SendsGuestAndHostEmails(t *testing.T) {
+	st := newMemStore()
+	host, event, _, _ := bookingFixture(t, st, "host@example.com")
+	mailer := &recordingMailer{}
+	deps := BookingDeps{Mailer: mailer, PublicAppURL: "https://app.sessionly.test"}
+
+	body := fmt.Sprintf(`{
+		"hostSlug": %q, "eventTypeSlug": %q, "startsAt": %q,
+		"guestName": "Pat Guest", "guestEmail": "pat@example.com"
+	}`, host.Slug, event.Slug, futureRFC3339(60))
+	rec := httptest.NewRecorder()
+	req := authReq(http.MethodPost, "/bookings", body)
+	handleCreateBooking(st, deps)(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("want 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	msgs := mailer.Messages()
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 emails (guest + host), got %d", len(msgs))
+	}
+	// First send is to the guest; second to the host (handler's call order).
+	if !strings.Contains(msgs[0].To[0], "pat@example.com") {
+		t.Fatalf("first send should target guest, got %v", msgs[0].To)
+	}
+	if !strings.Contains(msgs[1].To[0], "host@example.com") {
+		t.Fatalf("second send should target host, got %v", msgs[1].To)
+	}
+	// Room link uses the configured PublicAppURL + meet code.
+	if !strings.Contains(msgs[0].TextBody, "https://app.sessionly.test/room/") {
+		t.Fatalf("guest text body missing room URL: %q", msgs[0].TextBody)
+	}
+	// .ics attachment carries the booking summary.
+	if len(msgs[0].Attachments) != 1 || msgs[0].Attachments[0].Filename != "booking.ics" {
+		t.Fatalf("guest message should have booking.ics attached; got %+v", msgs[0].Attachments)
+	}
+}
+
+func TestCreateBooking_MailerFailureDoesNotBreakBooking(t *testing.T) {
+	st := newMemStore()
+	host, event, _, _ := bookingFixture(t, st, "host@example.com")
+	mailer := &recordingMailer{err: errors.New("smtp down")}
+	deps := BookingDeps{Mailer: mailer, PublicAppURL: "https://app.sessionly.test"}
+
+	body := fmt.Sprintf(`{
+		"hostSlug": %q, "eventTypeSlug": %q, "startsAt": %q,
+		"guestName": "Pat", "guestEmail": "pat@example.com"
+	}`, host.Slug, event.Slug, futureRFC3339(60))
+	rec := httptest.NewRecorder()
+	handleCreateBooking(st, deps)(rec, authReq(http.MethodPost, "/bookings", body))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("booking must still succeed when mailer fails; got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

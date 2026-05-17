@@ -16,6 +16,7 @@ import (
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfturn"
 	"github.com/vaishnavghenge/vartalaap-server/internal/config"
 	"github.com/vaishnavghenge/vartalaap-server/internal/db"
+	"github.com/vaishnavghenge/vartalaap-server/internal/email"
 	"github.com/vaishnavghenge/vartalaap-server/internal/httpx"
 	_ "github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 	"github.com/vaishnavghenge/vartalaap-server/internal/sfu"
@@ -102,9 +103,15 @@ func main() {
 			AccessTokenTTL: cfg.AccessTokenTTL,
 			SecureCookie:   cfg.SecureCookie,
 		}
+		mailer := email.NewFromEnv()
+		bookingDeps := httpx.BookingDeps{
+			Mailer:       mailer,
+			PublicAppURL: cfg.PublicAppURL,
+		}
+
 		httpx.AuthHandlers(mux, st, authCfg)
 		httpx.MeHandlers(mux, st, authCfg)
-		httpx.BookingHandlers(mux, st, authCfg)
+		httpx.BookingHandlers(mux, st, authCfg, bookingDeps)
 		httpx.SlotHandlers(mux, st, authCfg)
 		log.Println("Auth endpoints enabled")
 		log.Println("Scheduling endpoints enabled: /me/availability, /me/event-types")
