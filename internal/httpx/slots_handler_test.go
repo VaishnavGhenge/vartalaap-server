@@ -192,12 +192,35 @@ func TestGenerateSlots_DurationMustFit(t *testing.T) {
 	}
 }
 
+func TestGenerateSlots_BufferAffectsCadenceWithoutBookings(t *testing.T) {
+	// 30m event, 15m buffer, no existing bookings. Cadence must be 45m so a
+	// guest who picks back-to-back slots still leaves the configured gap for
+	// the host between sessions.
+	from := midnightUTC(2026, 5, 18)
+	to := midnightUTC(2026, 5, 19)
+	rules := []store.AvailabilityRule{rule(1, "09:00", "12:00", "UTC")}
+	got := generateSlots(rules, event30(15), nil, from, to, midnightUTC(2026, 5, 17))
+	want := []string{"09:00", "09:45", "10:30", "11:15"}
+	starts := make([]string, 0, len(got))
+	for _, t := range got {
+		starts = append(starts, t.Format("15:04"))
+	}
+	if len(starts) != len(want) {
+		t.Fatalf("want cadence-spaced %v, got %v", want, starts)
+	}
+	for i, s := range starts {
+		if s != want[i] {
+			t.Fatalf("slot %d: want %s, got %s (all=%v)", i, want[i], s, starts)
+		}
+	}
+}
+
 func TestGenerateSlots_BookingBlocksSlotWithBuffer(t *testing.T) {
-	// 30m event, 15m buffer. Existing booking 10:00-10:30 means 09:30 (ends
-	// 10:00, no buffer on the slot side — but 09:30 + 30m + booking buffer
-	// 15m before = 09:45 overlap with booking start 10:00? Let's spell out:
-	//   slot 09:30..10:00 vs booking-with-buffer 09:45..10:45 → overlap.
-	// So 09:30 should be blocked. 09:00 (ends 09:30) is clear of 09:45.
+	// 30m event, 15m buffer → cadence 45m, so candidates are 09:00, 09:45,
+	// 10:30, 11:15. Existing booking 10:00-10:30 buffered to 09:45-10:45
+	// blocks the 09:45 (overlaps the pre-buffer) and 10:30 (overlaps the
+	// post-buffer) candidates. 09:00 (ends 09:30, clear of 09:45) and 11:15
+	// (starts after 10:45) remain.
 	from := midnightUTC(2026, 5, 18)
 	to := midnightUTC(2026, 5, 19)
 	rules := []store.AvailabilityRule{rule(1, "09:00", "12:00", "UTC")}
@@ -206,33 +229,17 @@ func TestGenerateSlots_BookingBlocksSlotWithBuffer(t *testing.T) {
 		EndsAt:   time.Date(2026, 5, 18, 10, 30, 0, 0, time.UTC),
 	}}
 	got := generateSlots(rules, event30(15), bookings, from, to, midnightUTC(2026, 5, 17))
-
 	starts := make([]string, 0, len(got))
 	for _, t := range got {
 		starts = append(starts, t.Format("15:04"))
 	}
-	// Slots cleared: 09:00 (ends 09:30 < 09:45 booking-buffer-start). Blocked:
-	// 09:30, 10:00 (the booking itself), 10:30 (10:30..11:00 overlaps the
-	// post-booking 10:45 buffer). Cleared again from 11:00 onwards.
-	wantBlocked := map[string]bool{"09:30": true, "10:00": true, "10:30": true}
-	wantPresent := map[string]bool{"09:00": true, "11:00": true, "11:30": true}
-	for s := range wantBlocked {
-		for _, got := range starts {
-			if got == s {
-				t.Fatalf("slot %s should be blocked by booking-with-buffer, got %v", s, starts)
-			}
-		}
+	want := []string{"09:00", "11:15"}
+	if len(starts) != len(want) {
+		t.Fatalf("want %v after buffered booking, got %v", want, starts)
 	}
-	for s := range wantPresent {
-		found := false
-		for _, got := range starts {
-			if got == s {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("slot %s should be available, got %v", s, starts)
+	for i, s := range starts {
+		if s != want[i] {
+			t.Fatalf("slot %d: want %s, got %s (all=%v)", i, want[i], s, starts)
 		}
 	}
 }

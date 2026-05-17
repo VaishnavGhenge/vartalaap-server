@@ -107,7 +107,11 @@ type publicEventDTO struct {
 	Title       string `json:"title"`
 	Description string `json:"description,omitempty"`
 	DurationMin int    `json:"durationMin"`
-	IsPaid      bool   `json:"isPaid"`
+	// BufferMin is exposed publicly because the booking page uses it to
+	// explain the time blocked off for each session — useful for the guest
+	// to understand why the next visible slot starts later than they expect.
+	BufferMin int  `json:"bufferMin"`
+	IsPaid    bool `json:"isPaid"`
 }
 
 type hostProfileResponse struct {
@@ -134,6 +138,7 @@ func toPublicEventDTO(e store.EventType) publicEventDTO {
 		Slug:        e.Slug,
 		Title:       e.Title,
 		DurationMin: e.DurationMin,
+		BufferMin:   e.BufferMin,
 		IsPaid:      e.IsPaid,
 	}
 	if e.Description != nil {
@@ -331,11 +336,11 @@ func parseSlotsRange(rawFrom, rawTo string) (time.Time, time.Time, error) {
 //   - don't overlap any existing booking (including buffer-min on either side)
 //   - end before the availability window's end (so duration fits)
 //
-// Slot cadence is the event's duration (back-to-back). Buffer is applied
-// before/after each booking, not between candidate slots, so the picker stays
-// dense — a 30-min event with 15-min buffer surfaces 09:00, 09:30, 10:00, …
-// as candidates and only removes the ones that collide with the buffer of an
-// existing booking.
+// Slot cadence is duration + buffer, matching Cal.com semantics: a 30-min
+// event with a 15-min buffer surfaces 09:00, 09:45, 10:30, … so picking any
+// two adjacent slots still leaves the configured gap between sessions. The
+// per-booking buffer check below catches the cross-event case (someone
+// already booked a different slot in this window that's been buffered).
 func generateSlots(
 	rules []store.AvailabilityRule,
 	event store.EventType,
@@ -348,6 +353,7 @@ func generateSlots(
 	}
 	duration := time.Duration(event.DurationMin) * time.Minute
 	buffer := time.Duration(event.BufferMin) * time.Minute
+	cadence := duration + buffer
 
 	// Bucket rules by day-of-week so the per-day walk is O(rules-for-this-day)
 	// not O(all-rules) per iteration.
@@ -385,7 +391,7 @@ func generateSlots(
 				continue
 			}
 
-			for slot := start; !slot.Add(duration).After(end); slot = slot.Add(duration) {
+			for slot := start; !slot.Add(duration).After(end); slot = slot.Add(cadence) {
 				slotUTC := slot.UTC()
 				if slotUTC.Before(nowUTC) {
 					continue
