@@ -11,12 +11,19 @@ import (
 )
 
 type Hub struct {
-	mu    sync.Mutex
-	rooms map[string]*Room
+	mu          sync.Mutex
+	rooms       map[string]*Room
+	onRoomEmpty func(roomID string)
 }
 
 func NewHub() *Hub {
 	return &Hub{rooms: make(map[string]*Room)}
+}
+
+func (h *Hub) SetRoomEmptyHandler(handler func(roomID string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onRoomEmpty = handler
 }
 
 func (h *Hub) join(c *Client, roomID string) {
@@ -41,6 +48,7 @@ func (h *Hub) join(c *Client, roomID string) {
 	replaced = room.removeByPresenceID(presenceID, c.id)
 	if replaced != nil {
 		replaced.room = ""
+		room.removeSfuTracks(replaced.id)
 	}
 	existing := room.peerInfos()
 	room.add(c)
@@ -58,6 +66,12 @@ func (h *Hub) join(c *Client, roomID string) {
 
 	joinedData, _ := json.Marshal(JoinedData{Peers: existing})
 	c.sendJSON(&Envelope{Type: MsgJoined, Room: roomID, Data: joinedData})
+
+	// Replay each existing peer's published SFU tracks so the new joiner can subscribe.
+	for fromPeerID, trackData := range room.sfuTrackSnapshot() {
+		b, _ := json.Marshal(trackData)
+		c.sendJSON(&Envelope{Type: MsgSfuTracks, Room: roomID, From: fromPeerID, Data: b})
+	}
 
 	info := c.info()
 	evt, _ := json.Marshal(PeerJoinedData{
@@ -81,6 +95,7 @@ func (h *Hub) leaveAll(c *Client) {
 		return
 	}
 	room.remove(c.id)
+	room.removeSfuTracks(c.id)
 	h.gcLocked(room)
 	h.mu.Unlock()
 
@@ -121,24 +136,21 @@ func (h *Hub) forwardState(from *Client, to string, st PeerStateData) {
 	}
 }
 
-func (h *Hub) forwardSignal(from *Client, env *Envelope) {
+// BroadcastSfuTracks merges the new tracks into the peer's cumulative set, then
+// broadcasts the full merged list to all other peers in the room. Storing the
+// merged set (not just the latest batch) ensures late joiners receive all tracks
+// when the hub replays sfu-tracks during join.
+func (h *Hub) BroadcastSfuTracks(roomID, peerID string, data SfuTracksData) {
 	h.mu.Lock()
-	room := h.rooms[from.room]
+	room := h.rooms[roomID]
 	h.mu.Unlock()
 	if room == nil {
-		from.sendError("not in a room")
 		return
 	}
-	target := room.get(env.To)
-	if target == nil {
-		from.sendError("target peer not in room")
-		return
-	}
-	out := Envelope{Type: MsgSignal, Room: from.room, From: from.id, To: env.To, Data: env.Data}
-	b, _ := json.Marshal(out)
-	if !target.enqueue(b) {
-		from.sendError("target peer signaling queue is full")
-	}
+	merged := room.storeSfuTracks(peerID, data)
+	b, _ := json.Marshal(merged)
+	payload, _ := json.Marshal(Envelope{Type: MsgSfuTracks, Room: roomID, From: peerID, Data: b})
+	room.broadcastExcept(peerID, payload)
 }
 
 // Must be called with h.mu held.
@@ -146,6 +158,9 @@ func (h *Hub) gcLocked(r *Room) {
 	if r.empty() {
 		delete(h.rooms, r.id)
 		metrics.ActiveRooms.Dec()
+		if h.onRoomEmpty != nil {
+			go h.onRoomEmpty(r.id)
+		}
 	}
 }
 

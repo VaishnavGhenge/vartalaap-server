@@ -3,8 +3,10 @@ package signaling
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"log/slog"
+	"regexp"
 	"sync"
 	"time"
 
@@ -18,12 +20,15 @@ const (
 	readIdleTimeout  = 60 * time.Second
 )
 
+var roomIDPattern = regexp.MustCompile(`^[a-z2-9]{3}-[a-z2-9]{4}-[a-z2-9]{3}$`)
+
 type Client struct {
-	id   string
-	conn *websocket.Conn
-	hub  *Hub
-	send chan []byte
-	room string
+	id       string
+	conn     *websocket.Conn
+	hub      *Hub
+	send     chan []byte
+	room     string
+	roomGate RoomGate
 
 	mu            sync.RWMutex
 	name          string
@@ -98,11 +103,33 @@ func (c *Client) readPump(ctx context.Context) {
 }
 
 func (c *Client) handle(env *Envelope) {
+	// Count every handled message. The label is the message type so we can
+	// detect signaling storms, peer-state churn, or a missing client-metric
+	// from a peer that should have completed setup.
+	metrics.SignalsTotal.WithLabelValues(string(env.Type)).Inc()
 	switch env.Type {
 	case MsgJoin:
 		if env.Room == "" {
 			c.sendError("join requires room")
 			return
+		}
+		if !roomIDPattern.MatchString(env.Room) {
+			c.sendError("invalid room")
+			return
+		}
+		if c.roomGate != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			err := c.roomGate(ctx, env.Room)
+			cancel()
+			if err != nil {
+				var gateErr *RoomGateError
+				if errors.As(err, &gateErr) {
+					c.sendErrorCode(gateErr.Code, gateErr.Message)
+				} else {
+					c.sendErrorCode("ROOM_UNAVAILABLE", "This room is not available yet.")
+				}
+				return
+			}
 		}
 		var jd JoinData
 		if len(env.Data) > 0 {
@@ -132,15 +159,6 @@ func (c *Client) handle(env *Envelope) {
 		}
 		c.setState(st.Audio, st.Video, st.ScreenSharing, st.VideoHeld)
 		c.hub.broadcastState(c, st)
-	case MsgSignal:
-		if env.To == "" {
-			c.sendError("signal requires 'to'")
-			return
-		}
-		st := signalSubtype(env.Data)
-		metrics.SignalsTotal.WithLabelValues(st).Inc()
-		slog.Info("ws_msg", "type", "signal", "peer_id", c.id, "room", c.room, "to", env.To, "signal_type", st)
-		c.hub.forwardSignal(c, env)
 	case MsgPing:
 		c.sendJSON(&Envelope{Type: MsgPong})
 	case MsgStatsReport:
@@ -189,8 +207,70 @@ func (c *Client) handle(env *Envelope) {
 			)
 		}
 		slog.Info("stats_report", args...)
+	case MsgClientMetric:
+		var m ClientMetricData
+		if len(env.Data) > 0 {
+			if err := json.Unmarshal(env.Data, &m); err != nil {
+				return
+			}
+		}
+		c.observeClientMetric(m)
 	default:
 		c.sendError("unknown message type: " + string(env.Type))
+	}
+}
+
+// observeClientMetric translates one browser-side observation into a Prometheus
+// observation. Validation is strict on purpose — a malformed value would
+// otherwise pollute the histogram permanently. We bound values to a sane
+// ceiling (60s) so a bug in the client clock can't blow out the buckets.
+func (c *Client) observeClientMetric(m ClientMetricData) {
+	const maxObservation = 60.0 // anything beyond this is a clock skew or bug
+	v := m.Value
+	if v < 0 || v != v { // negative or NaN
+		return
+	}
+	if v > maxObservation {
+		v = maxObservation
+	}
+	switch m.Name {
+	case "time_to_first_media":
+		metrics.TimeToFirstMedia.Observe(v)
+		slog.Info("client_metric",
+			"peer_id", c.id, "room", c.room,
+			"name", m.Name, "value_s", v,
+		)
+	case "call_setup_phase":
+		phase := m.Phase
+		switch phase {
+		case "ice_gather", "pub_connected", "sub_connected", "first_media":
+			metrics.CallSetupPhase.WithLabelValues(phase).Observe(v)
+		default:
+			return
+		}
+		slog.Info("client_metric",
+			"peer_id", c.id, "room", c.room,
+			"name", m.Name, "phase", phase, "value_s", v,
+		)
+	case "call_attempt":
+		result := m.Result
+		switch result {
+		case "success", "timeout", "error", "abandoned":
+			metrics.CallAttempts.WithLabelValues(result).Inc()
+		default:
+			return
+		}
+		slog.Info("client_metric",
+			"peer_id", c.id, "room", c.room,
+			"name", m.Name, "result", result,
+		)
+	default:
+		// Unknown metric name. Logging at debug level avoids amplifying a buggy
+		// client into a log flood — at info level a misbehaving browser could
+		// emit thousands of lines/s.
+		slog.Debug("client_metric_unknown",
+			"peer_id", c.id, "name", m.Name,
+		)
 	}
 }
 
@@ -227,23 +307,10 @@ func (c *Client) enqueueBestEffort(msg []byte) bool {
 }
 
 func (c *Client) sendError(msg string) {
-	data, _ := json.Marshal(ErrorData{Message: msg})
-	c.sendJSON(&Envelope{Type: MsgError, Data: data})
+	c.sendErrorCode("", msg)
 }
 
-func signalSubtype(data json.RawMessage) string {
-	var v struct {
-		Type      string          `json:"type"`
-		Candidate json.RawMessage `json:"candidate"`
-	}
-	if len(data) == 0 || json.Unmarshal(data, &v) != nil {
-		return "unknown"
-	}
-	if v.Type != "" {
-		return v.Type // "offer" or "answer"
-	}
-	if len(v.Candidate) > 0 {
-		return "candidate"
-	}
-	return "unknown"
+func (c *Client) sendErrorCode(code, msg string) {
+	data, _ := json.Marshal(ErrorData{Message: msg, Code: code})
+	c.sendJSON(&Envelope{Type: MsgError, Data: data})
 }

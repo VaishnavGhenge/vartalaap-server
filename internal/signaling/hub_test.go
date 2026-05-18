@@ -161,3 +161,63 @@ func TestHubForwardStateTargetsOnePeer(t *testing.T) {
 		t.Fatal("targeted videoHeld state should not mutate sender room presence")
 	}
 }
+
+func TestHubBroadcastSfuTracks(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-publisher")
+	subscriber1 := testClient("peer-sub1")
+	subscriber2 := testClient("peer-sub2")
+	setTestClientState(publisher, "Alice", "presence-alice")
+	setTestClientState(subscriber1, "Bob", "presence-bob")
+	setTestClientState(subscriber2, "Carol", "presence-carol")
+
+	hub.join(publisher, "room-1")
+	hub.join(subscriber1, "room-1")
+	hub.join(subscriber2, "room-1")
+	drainEnvelopes(t, publisher)
+	drainEnvelopes(t, subscriber1)
+	drainEnvelopes(t, subscriber2)
+
+	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
+		SessionID: "cf-session-abc",
+		Tracks: []SfuTrackInfo{
+			{TrackName: "audio", Mid: "0"},
+			{TrackName: "video", Mid: "1"},
+		},
+	})
+
+	// Subscribers receive sfu-tracks; publisher does not.
+	for _, sub := range []*Client{subscriber1, subscriber2} {
+		msgs := drainEnvelopes(t, sub)
+		env, ok := findEnvelope(msgs, MsgSfuTracks)
+		if !ok {
+			t.Fatalf("%s: expected sfu-tracks message", sub.id)
+		}
+		if env.From != publisher.id {
+			t.Fatalf("%s: expected From=%s, got %s", sub.id, publisher.id, env.From)
+		}
+		var data SfuTracksData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			t.Fatalf("%s: unmarshal sfu-tracks data: %v", sub.id, err)
+		}
+		if data.SessionID != "cf-session-abc" {
+			t.Fatalf("%s: expected sessionId=cf-session-abc, got %q", sub.id, data.SessionID)
+		}
+		if len(data.Tracks) != 2 {
+			t.Fatalf("%s: expected 2 tracks, got %d", sub.id, len(data.Tracks))
+		}
+	}
+
+	if msgs := drainEnvelopes(t, publisher); len(msgs) != 0 {
+		t.Fatalf("publisher should not receive its own sfu-tracks broadcast, got %d messages", len(msgs))
+	}
+}
+
+func TestHubBroadcastSfuTracks_NoRoom(t *testing.T) {
+	hub := NewHub()
+	// BroadcastSfuTracks on a non-existent room must not panic.
+	hub.BroadcastSfuTracks("nonexistent-room", "peer-1", SfuTracksData{
+		SessionID: "sess",
+		Tracks:    []SfuTrackInfo{{TrackName: "audio"}},
+	})
+}

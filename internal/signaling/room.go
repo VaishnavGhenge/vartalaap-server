@@ -3,13 +3,62 @@ package signaling
 import "sync"
 
 type Room struct {
-	id      string
-	mu      sync.RWMutex
-	members map[string]*Client
+	id         string
+	mu         sync.RWMutex
+	members    map[string]*Client
+	sfuTracks  map[string]SfuTracksData // peerID → published tracks
 }
 
 func newRoom(id string) *Room {
-	return &Room{id: id, members: make(map[string]*Client)}
+	return &Room{id: id, members: make(map[string]*Client), sfuTracks: make(map[string]SfuTracksData)}
+}
+
+// storeSfuTracks merges the new tracks into the peer's cumulative set, keyed by
+// trackName. Returns the full merged payload so the caller can broadcast it.
+// This ensures both live peers and late joiners always see all published tracks,
+// not just the last batch (e.g. audio-only first publish, video added later).
+func (r *Room) storeSfuTracks(peerID string, data SfuTracksData) SfuTracksData {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	existing, ok := r.sfuTracks[peerID]
+	if !ok {
+		r.sfuTracks[peerID] = data
+		return data
+	}
+	// Upsert by trackName — new data wins on conflict. SessionID is always updated
+	// because it changes when a peer leaves and rejoins with a new CF session.
+	byName := make(map[string]SfuTrackInfo, len(existing.Tracks)+len(data.Tracks))
+	for _, t := range existing.Tracks {
+		byName[t.TrackName] = t
+	}
+	for _, t := range data.Tracks {
+		byName[t.TrackName] = t
+	}
+	merged := make([]SfuTrackInfo, 0, len(byName))
+	for _, t := range byName {
+		merged = append(merged, t)
+	}
+	result := SfuTracksData{SessionID: data.SessionID, Tracks: merged}
+	r.sfuTracks[peerID] = result
+	return result
+}
+
+func (r *Room) removeSfuTracks(peerID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.sfuTracks, peerID)
+}
+
+// sfuTrackSnapshot returns a copy of all stored sfu-tracks entries.
+// Safe to call without the lock held by the caller.
+func (r *Room) sfuTrackSnapshot() map[string]SfuTracksData {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]SfuTracksData, len(r.sfuTracks))
+	for k, v := range r.sfuTracks {
+		out[k] = v
+	}
+	return out
 }
 
 func (r *Room) add(c *Client) {

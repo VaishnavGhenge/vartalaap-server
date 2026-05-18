@@ -191,6 +191,40 @@ body {
   </div>
 </div>
 
+<div class="section-label">Connection SLO <span id="slo-age" style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted);font-size:10px;margin-left:6px"></span></div>
+<div class="stat-grid" style="margin-bottom:28px">
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" id="dot-ttfm-p50" style="background:var(--green)"></div>TTFM p50</div>
+    <div class="value" id="s-ttfm-p50">—</div>
+    <div class="sub">first frame</div>
+  </div>
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" id="dot-ttfm-p95" style="background:var(--green)"></div>TTFM p95</div>
+    <div class="value" id="s-ttfm-p95">—</div>
+    <div class="sub">target &le; 3s</div>
+  </div>
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" id="dot-ttfm-p99" style="background:var(--green)"></div>TTFM p99</div>
+    <div class="value" id="s-ttfm-p99">—</div>
+    <div class="sub">target &le; 6s</div>
+  </div>
+  <div class="stat-card">
+    <div class="label"><div class="label-dot" id="dot-success" style="background:var(--green)"></div>Success Rate</div>
+    <div class="value" id="s-success">—</div>
+    <div class="sub" id="s-success-sub">target &ge; 99.5%</div>
+  </div>
+</div>
+<div class="chart-grid" style="margin-bottom:28px">
+  <div class="chart-card">
+    <div class="chart-title">TTFM percentiles (s)</div>
+    <div class="chart-wrap"><canvas id="c-ttfm"></canvas></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-title">HTTP p95 latency (ms)</div>
+    <div class="chart-wrap"><canvas id="c-http"></canvas></div>
+  </div>
+</div>
+
 <div class="section-label">Call Quality <span id="quality-age" style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted);font-size:10px;margin-left:6px"></span></div>
 <div class="stat-grid" style="margin-bottom:28px">
   <div class="stat-card">
@@ -308,6 +342,12 @@ const charts = {
   ]),
   rtt:  makeChart('c-rtt',  [ds('rtt ms',  '#a78bfa')]),
   loss: makeChart('c-loss', [ds('loss %',  '#f87171')]),
+  ttfm: makeChart('c-ttfm', [
+    ds('p50', '#4ade80'),
+    ds('p95', '#fbbf24'),
+    ds('p99', '#f87171'),
+  ]),
+  http: makeChart('c-http', [ds('p95 ms', '#60a5fa')]),
 };
 
 // ── state ─────────────────────────────────────
@@ -316,6 +356,8 @@ const history = {
   peers: [], rooms: [],
   offer: [], answer: [], candidate: [],
   rtt: [], loss: [],
+  ttfm_p50: [], ttfm_p95: [], ttfm_p99: [],
+  http_p95: [],
 };
 let prevSignals = null;
 
@@ -366,6 +408,48 @@ async function poll() {
     const ageEl = document.getElementById('quality-age');
     ageEl.textContent = totalQ > 0 ? `${totalQ} reporting` : 'waiting for reports…';
 
+    // ── Connection SLO ─────────────────────────
+    // TTFM histogram summary (computed server-side from raw bucket counts).
+    // Empty histogram → all values are 0; we show em-dashes instead.
+    const ttfm = d.ttfm_seconds || {};
+    const hasTtfm = (ttfm.count || 0) > 0;
+    const sloAge = document.getElementById('slo-age');
+    sloAge.textContent = hasTtfm ? `${ttfm.count} samples` : 'waiting for first call…';
+
+    setSec('s-ttfm-p50', ttfm.p50, hasTtfm);
+    setSec('s-ttfm-p95', ttfm.p95, hasTtfm);
+    setSec('s-ttfm-p99', ttfm.p99, hasTtfm);
+    // SLO target dots: green = within target, amber = degraded, red = SLO breach.
+    sloDot('dot-ttfm-p50', ttfm.p50, hasTtfm, 1.5, 3);
+    sloDot('dot-ttfm-p95', ttfm.p95, hasTtfm, 3,   6);
+    sloDot('dot-ttfm-p99', ttfm.p99, hasTtfm, 6,   10);
+
+    const attempts = d.call_attempts || {};
+    const totalAttempts = (attempts.success || 0) + (attempts.timeout || 0) +
+                          (attempts.error   || 0) + (attempts.abandoned || 0);
+    const successEl    = document.getElementById('s-success');
+    const successSubEl = document.getElementById('s-success-sub');
+    if (totalAttempts === 0) {
+      successEl.textContent = '—';
+      successSubEl.textContent = 'target ≥ 99.5%';
+      sloDot('dot-success', 0, false, 0, 0);
+    } else {
+      const rate = attempts.success_rate_pct || 0;
+      successEl.textContent = rate.toFixed(rate >= 99.95 ? 1 : 2) + '%';
+      // Show the failure breakdown so a degraded rate has an immediate cause.
+      const fails = (attempts.timeout || 0) + (attempts.error || 0);
+      successSubEl.textContent = fails > 0
+        ? `${attempts.timeout || 0} timeout · ${attempts.error || 0} error`
+        : `${totalAttempts} attempt${totalAttempts === 1 ? '' : 's'}`;
+      // Success-rate SLO is inverted: HIGHER is better. Pass 100/100-rate to
+      // sloDot so its lower-is-better thresholds still work.
+      sloDot('dot-success', 100 - rate, true, 0.5, 5);
+    }
+
+    // HTTP p95 latency (overall API health).
+    const http = d.http_seconds || {};
+    const httpP95Ms = (http.p95 || 0) * 1000;
+
     // Signal rate (delta since last poll)
     const offer     = delta('signals_offer',     d.signals_offer);
     const answer    = delta('signals_answer',    d.signals_answer);
@@ -379,11 +463,17 @@ async function poll() {
     push('candidate', candidate);
     push('rtt',  q.avg_rtt_ms  ?? 0);
     push('loss', q.avg_loss_pct ?? 0);
+    push('ttfm_p50', hasTtfm ? ttfm.p50 : null);
+    push('ttfm_p95', hasTtfm ? ttfm.p95 : null);
+    push('ttfm_p99', hasTtfm ? ttfm.p99 : null);
+    push('http_p95', httpP95Ms);
 
     applyHistory(charts.presence, 'labels', ['peers', 'rooms']);
     applyHistory(charts.signals,  'labels', ['offer', 'answer', 'candidate']);
     applyHistory(charts.rtt,      'labels', ['rtt']);
     applyHistory(charts.loss,     'labels', ['loss']);
+    applyHistory(charts.ttfm,     'labels', ['ttfm_p50', 'ttfm_p95', 'ttfm_p99']);
+    applyHistory(charts.http,     'labels', ['http_p95']);
 
     // Status
     const pulse = document.getElementById('pulse');
@@ -397,6 +487,28 @@ async function poll() {
 
 function set(id, val) {
   document.getElementById(id).textContent = val != null ? Math.round(val) : '—';
+}
+
+// Display a seconds value as "1.8s" or "850ms" — whichever reads tighter.
+// hasData=false renders an em-dash so empty histograms don't show "0s".
+function setSec(id, valSeconds, hasData) {
+  const el = document.getElementById(id);
+  if (!hasData || valSeconds == null) { el.textContent = '—'; return; }
+  if (valSeconds < 1) el.textContent = Math.round(valSeconds * 1000) + 'ms';
+  else                el.textContent = valSeconds.toFixed(2) + 's';
+}
+
+// Color a label-dot by SLO compliance. lower-is-better metrics: greenMax is the
+// "still good" ceiling; amberMax is the "degraded but not broken" ceiling;
+// anything above amberMax is a breach. For the inverted success-rate case the
+// caller passes (100 - rate) and threshold values in percent.
+function sloDot(id, val, hasData, greenMax, amberMax) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (!hasData) { el.style.background = 'var(--muted)'; return; }
+  if (val <= greenMax)      el.style.background = 'var(--green)';
+  else if (val <= amberMax) el.style.background = 'var(--amber)';
+  else                      el.style.background = 'var(--red)';
 }
 
 const prev = {};
