@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -68,7 +69,7 @@ func BookingHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, deps B
 			// Pre-flight covers both GET and DELETE — the browser sends one
 			// OPTIONS per actual method, so advertising both keeps the
 			// dashboard cancel path from being blocked by CORS.
-			bookingsRoute(cfg, http.MethodGet, nil,
+			bookingsRoute(cfg, "GET, DELETE", nil,
 				func(w http.ResponseWriter, r *http.Request) {})(w, r)
 		case http.MethodGet:
 			bookingsRoute(cfg, http.MethodGet, publicLim, handleGetBooking(st, id))(w, r)
@@ -325,6 +326,7 @@ func sendBookingEmails(ctx context.Context, deps BookingDeps, b *store.Booking, 
 		StartsAt:     b.StartsAt,
 		EndsAt:       b.EndsAt,
 		MeetCode:     b.MeetCode,
+		CancelToken:  b.CancelToken,
 		PublicAppURL: deps.PublicAppURL,
 	}
 	sendCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
@@ -383,6 +385,15 @@ func handleGuestCancelBooking(st store.Storer, deps BookingDeps, code string) ht
 			WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
 			return
 		}
+		// Magic-link auth: the cancel token from the confirmation email must
+		// match. Constant-time compare to avoid timing leaks on token shape.
+		// 404 (not 401/403) so an attacker probing meet codes can't tell
+		// "valid code, wrong token" from "no such booking".
+		token := r.URL.Query().Get("t")
+		if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(b.CancelToken)) != 1 {
+			WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
+			return
+		}
 		if b.Status == "cancelled" {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -418,6 +429,7 @@ func sendCancellationEmails(ctx context.Context, deps BookingDeps, b *store.Book
 		StartsAt:     b.StartsAt,
 		EndsAt:       b.EndsAt,
 		MeetCode:     b.MeetCode,
+		CancelToken:  b.CancelToken,
 		PublicAppURL: deps.PublicAppURL,
 	}
 	sendCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
@@ -454,7 +466,9 @@ func handleListMyBookings(st store.Storer) http.HandlerFunc {
 			WriteError(w, http.StatusUnauthorized, "UNAUTHORIZED", "unauthorized")
 			return
 		}
-		from := time.Now().UTC()
+		// Look back 2 hours so sessions that have already started (but not
+		// yet ended) appear on the dashboard alongside upcoming ones.
+		from := time.Now().UTC().Add(-2 * time.Hour)
 		bookings, err := st.ListBookingsForHost(r.Context(), userID, from, 100)
 		if err != nil {
 			slog.Error("me/bookings: list", "err", err, "user_id", userID)
