@@ -23,10 +23,14 @@ type BookingInput struct {
 	StartsAt     time.Time
 	EndsAt       time.Time
 	MeetCode     string
+	// CancelToken is the magic-link credential included on the booking-page
+	// URL the guest receives. Optional in case the caller doesn't have one
+	// (e.g. host notification where we don't expose the guest's cancel link).
+	CancelToken string
 	// PublicAppURL is the absolute base URL of the booking site (e.g.
 	// https://getsessionly.com). The room link is built as
 	// `<PublicAppURL>/room/<MeetCode>` and the confirmation link as
-	// `<PublicAppURL>/m/<MeetCode>`.
+	// `<PublicAppURL>/m/<MeetCode>?t=<CancelToken>`.
 	PublicAppURL string
 }
 
@@ -36,6 +40,11 @@ type BookingInput struct {
 func RenderBookingConfirmation(in BookingInput, from string) Message {
 	roomURL := joinURL(in.PublicAppURL, "/room/"+in.MeetCode)
 	confirmURL := joinURL(in.PublicAppURL, "/m/"+in.MeetCode)
+	if in.CancelToken != "" {
+		// The guest's link carries the cancel token so the same page can
+		// drive both "manage" and "cancel" without a second credential.
+		confirmURL += "?t=" + in.CancelToken
+	}
 	when := formatWhen(in.StartsAt, in.EndsAt, in.HostTimezone)
 
 	text := strings.Join([]string{
@@ -45,7 +54,7 @@ func RenderBookingConfirmation(in BookingInput, from string) Message {
 		fmt.Sprintf("When:  %s", when),
 		fmt.Sprintf("Where: %s", roomURL),
 		"",
-		fmt.Sprintf("Booking page: %s", confirmURL),
+		fmt.Sprintf("Manage or cancel: %s", confirmURL),
 		fmt.Sprintf("Meet code: %s", in.MeetCode),
 		"",
 		"The room opens at the booked time. Bookmark this email — the meet link",
@@ -259,7 +268,7 @@ const guestHTML = `<!doctype html>
 <p style="margin:0 0 4px"><strong>When:</strong> {{.When}}</p>
 <p style="margin:0 0 16px"><strong>Where:</strong> <a href="{{.RoomURL}}">{{.RoomURL}}</a></p>
 <p style="margin:0 0 4px;color:#666">Meet code: <code>{{.MeetCode}}</code></p>
-<p style="margin:16px 0 0;color:#888;font-size:13px">The room opens at the booked time. Bookmark <a href="{{.ConfirmURL}}">your booking page</a> for the canonical link.</p>
+<p style="margin:16px 0 0;color:#888;font-size:13px">The room opens at the booked time. Need to <a href="{{.ConfirmURL}}">manage or cancel</a> this booking? Use that link — it's tied to this email.</p>
 </td></tr>
 </table>
 </body></html>`

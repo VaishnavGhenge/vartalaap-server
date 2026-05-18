@@ -104,7 +104,12 @@ type Booking struct {
 	MeetCode        string
 	Status          string  // "pending_payment" | "confirmed" | "cancelled" | "completed"
 	StripeSessionID *string
-	CreatedAt       time.Time
+	// CancelToken authorises DELETE /m/{code}. The handler compares the
+	// caller's `?t=` query param against this value with constant-time
+	// equality. Distinct from MeetCode so leaking the join URL doesn't
+	// confer cancel authority.
+	CancelToken string
+	CreatedAt   time.Time
 }
 
 // SlotHold is a short-lived reservation while a guest fills out the booking
@@ -537,7 +542,8 @@ func (s *Store) CountActiveEventTypes(ctx context.Context, hostID string) (int, 
 // ─── Bookings ────────────────────────────────────────────────────────────────
 
 const bookingCols = `id, event_type_id, host_id, guest_email, guest_name,
-		starts_at, ends_at, meet_code, status, stripe_session_id, created_at`
+		starts_at, ends_at, meet_code, status, stripe_session_id,
+		cancel_token, created_at`
 
 func scanBooking(row pgx.Row, b *Booking) error {
 	return row.Scan(
@@ -545,7 +551,7 @@ func scanBooking(row pgx.Row, b *Booking) error {
 		&b.GuestEmail, &b.GuestName,
 		&b.StartsAt, &b.EndsAt,
 		&b.MeetCode, &b.Status, &b.StripeSessionID,
-		&b.CreatedAt,
+		&b.CancelToken, &b.CreatedAt,
 	)
 }
 
@@ -554,14 +560,20 @@ func scanBooking(row pgx.Row, b *Booking) error {
 // than a retry loop here — the handler owns the generation strategy).
 func (s *Store) CreateBooking(ctx context.Context, b Booking) (*Booking, error) {
 	out := &Booking{}
+	// CancelToken: caller passes one when it cares about determinism (tests);
+	// otherwise the column default (random uuid hex) fills in. The NULLIF
+	// pattern lets us keep one INSERT path for both cases.
 	err := scanBooking(s.pool.QueryRow(ctx,
 		`INSERT INTO bookings
 		   (event_type_id, host_id, guest_email, guest_name,
-		    starts_at, ends_at, meet_code, status, stripe_session_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		    starts_at, ends_at, meet_code, status, stripe_session_id,
+		    cancel_token)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
+		         COALESCE(NULLIF($10, ''), replace(gen_random_uuid()::text, '-', '')))
 		 RETURNING `+bookingCols,
 		b.EventTypeID, b.HostID, b.GuestEmail, b.GuestName,
 		b.StartsAt, b.EndsAt, b.MeetCode, b.Status, b.StripeSessionID,
+		b.CancelToken,
 	), out)
 	if err != nil {
 		if isUniqueViolation(err) {

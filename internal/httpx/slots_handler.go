@@ -70,7 +70,8 @@ func SlotHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, deps Book
 		}
 		switch r.Method {
 		case http.MethodOptions:
-			bookingsRoute(cfg, http.MethodGet, nil,
+			// Preflight must advertise DELETE too — the guest cancel link uses it.
+			bookingsRoute(cfg, "GET, DELETE", nil,
 				func(w http.ResponseWriter, r *http.Request) {})(w, r)
 		case http.MethodGet:
 			bookingsRoute(cfg, http.MethodGet, lim, handleGetBookingByMeetCode(st, code))(w, r)
