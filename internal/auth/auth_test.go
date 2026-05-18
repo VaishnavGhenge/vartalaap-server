@@ -53,6 +53,13 @@ func TestVerifyAccessTokenExpired(t *testing.T) {
 	}
 }
 
+func TestVerifyAccessTokenRejectsEmptyUserID(t *testing.T) {
+	token, _ := auth.SignAccessToken("", "secret", time.Minute)
+	if _, err := auth.VerifyAccessToken(token, "secret"); err == nil {
+		t.Fatal("expected error for empty user id, got nil")
+	}
+}
+
 func TestNewRefreshTokenIsUnique(t *testing.T) {
 	raw1, hash1, err := auth.NewRefreshToken()
 	if err != nil {

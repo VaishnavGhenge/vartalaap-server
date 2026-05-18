@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vaishnavghenge/vartalaap-server/internal/plans"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
 
@@ -68,12 +69,12 @@ func dispatchBookings(st store.Storer, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/me/bookings" && r.Method == http.MethodGet {
-		RequireAuth(testSecret, handleListMyBookings(st))(w, r)
+		RequireAuth(testSecret, handleListMyBookings(st, BookingRoomWindow{}))(w, r)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/bookings/") && r.Method == http.MethodGet {
 		id := strings.TrimPrefix(r.URL.Path, "/bookings/")
-		handleGetBooking(st, id)(w, r)
+		handleGetBooking(st, BookingDeps{}, id)(w, r)
 		return
 	}
 	http.Error(w, "not found", http.StatusNotFound)
@@ -197,7 +198,7 @@ func TestCreateBooking_FreeHostMonthlyLimit(t *testing.T) {
 
 	// Pre-fill the host's bookings for this month right up to the cap.
 	now := time.Now().UTC()
-	for i := 0; i < freePlanMonthlyBookingLimit; i++ {
+	for i := 0; i < plans.For(plans.Free).MonthlyBookings; i++ {
 		_, err := st.CreateBooking(context.Background(), store.Booking{
 			EventTypeID: event.ID,
 			HostID:      host.ID,
@@ -234,7 +235,7 @@ func TestCreateBooking_SoloHostNoCap(t *testing.T) {
 
 	// Pre-fill past the free cap.
 	now := time.Now().UTC()
-	for i := 0; i < freePlanMonthlyBookingLimit+1; i++ {
+	for i := 0; i < plans.For(plans.Free).MonthlyBookings+1; i++ {
 		_, err := st.CreateBooking(context.Background(), store.Booking{
 			EventTypeID: event.ID, HostID: host.ID,
 			GuestEmail: fmt.Sprintf("g%d@example.com", i), GuestName: "G",
@@ -385,7 +386,7 @@ func TestListMyBookings_FiltersPastAndCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed cancelled: %v", err)
 	}
-	if err := st.CancelBooking(context.Background(), cancelled.ID); err != nil {
+	if err := st.CancelBooking(context.Background(), cancelled.ID, "No longer needed", "host"); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	// One live future booking — SHOULD appear.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/vaishnavghenge/vartalaap-server/internal/auth"
 	"github.com/vaishnavghenge/vartalaap-server/internal/email"
+	"github.com/vaishnavghenge/vartalaap-server/internal/plans"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
 
@@ -21,12 +22,20 @@ import (
 type BookingDeps struct {
 	Mailer       email.Mailer
 	PublicAppURL string
+	RoomWindow   BookingRoomWindow
 }
 
-// freePlanMonthlyBookingLimit caps the bookings a free-tier host can take in a
-// calendar month. The roadmap names this number explicitly; codifying it as a
-// const means the value is greppable when Phase 3 wires plan upgrades.
-const freePlanMonthlyBookingLimit = 10
+type BookingRoomWindow struct {
+	OpenBefore time.Duration
+	CloseAfter time.Duration
+}
+
+type bookingRoomAccess struct {
+	Status   string
+	Message  string
+	OpensAt  time.Time
+	ClosesAt time.Time
+}
 
 // meetCodeCollisionRetries bounds how many fresh meet codes we generate before
 // giving up on an insert. With 32^10 raw codes the actual probability of
@@ -72,7 +81,7 @@ func BookingHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, deps B
 			bookingsRoute(cfg, "GET, DELETE", nil,
 				func(w http.ResponseWriter, r *http.Request) {})(w, r)
 		case http.MethodGet:
-			bookingsRoute(cfg, http.MethodGet, publicLim, handleGetBooking(st, id))(w, r)
+			bookingsRoute(cfg, http.MethodGet, publicLim, handleGetBooking(st, deps, id))(w, r)
 		case http.MethodDelete:
 			bookingsRoute(cfg, http.MethodDelete, hostLim,
 				RequireAuth(cfg.JWTSecret, handleHostCancelBooking(st, deps, id)))(w, r)
@@ -88,7 +97,7 @@ func BookingHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, deps B
 				func(w http.ResponseWriter, r *http.Request) {})(w, r)
 		case http.MethodGet:
 			bookingsRoute(cfg, http.MethodGet, hostLim,
-				RequireAuth(cfg.JWTSecret, handleListMyBookings(st)))(w, r)
+				RequireAuth(cfg.JWTSecret, handleListMyBookings(st, deps.RoomWindow)))(w, r)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -115,22 +124,33 @@ type createBookingRequest struct {
 	// HoldToken is optional. When present, the conflict checks ignore any
 	// hold with this token (so a guest's own held slot doesn't block their
 	// own submit) and the hold is consumed on success.
-	HoldToken     string `json:"holdToken,omitempty"`
+	HoldToken string `json:"holdToken,omitempty"`
 }
 
 type bookingDTO struct {
-	ID            string    `json:"id"`
-	EventTypeID   string    `json:"eventTypeId"`
-	EventTypeSlug string    `json:"eventTypeSlug,omitempty"`
-	EventTitle    string    `json:"eventTitle,omitempty"`
-	HostID        string    `json:"hostId"`
-	HostSlug      string    `json:"hostSlug,omitempty"`
-	GuestName     string    `json:"guestName"`
-	GuestEmail    string    `json:"guestEmail"`
-	StartsAt      time.Time `json:"startsAt"`
-	EndsAt        time.Time `json:"endsAt"`
-	MeetCode      string    `json:"meetCode"`
-	Status        string    `json:"status"`
+	ID                 string    `json:"id"`
+	EventTypeID        string    `json:"eventTypeId"`
+	EventTypeSlug      string    `json:"eventTypeSlug,omitempty"`
+	EventTitle         string    `json:"eventTitle,omitempty"`
+	HostID             string    `json:"hostId"`
+	HostSlug           string    `json:"hostSlug,omitempty"`
+	GuestName          string    `json:"guestName"`
+	GuestEmail         string    `json:"guestEmail"`
+	StartsAt           time.Time `json:"startsAt"`
+	EndsAt             time.Time `json:"endsAt"`
+	MeetCode           string    `json:"meetCode"`
+	Status             string    `json:"status"`
+	CancellationReason *string   `json:"cancellationReason,omitempty"`
+	CancelledBy        *string   `json:"cancelledBy,omitempty"`
+	RoomStatus         string    `json:"roomStatus"`
+	RoomMessage        string    `json:"roomMessage,omitempty"`
+	RoomOpensAt        time.Time `json:"roomOpensAt"`
+	RoomClosesAt       time.Time `json:"roomClosesAt"`
+	ServerNow          time.Time `json:"serverNow"`
+}
+
+type cancelBookingRequest struct {
+	Reason string `json:"reason"`
 }
 
 type bookingListResponse struct {
@@ -138,16 +158,29 @@ type bookingListResponse struct {
 }
 
 func toBookingDTO(b store.Booking, event *store.EventType, host *store.User) bookingDTO {
+	return toBookingDTOWithWindow(b, event, host, BookingRoomWindow{})
+}
+
+func toBookingDTOWithWindow(b store.Booking, event *store.EventType, host *store.User, window BookingRoomWindow) bookingDTO {
+	now := time.Now().UTC()
+	access := BookingRoomAccessFor(b, now, window)
 	dto := bookingDTO{
-		ID:          b.ID,
-		EventTypeID: b.EventTypeID,
-		HostID:      b.HostID,
-		GuestName:   b.GuestName,
-		GuestEmail:  b.GuestEmail,
-		StartsAt:    b.StartsAt.UTC(),
-		EndsAt:      b.EndsAt.UTC(),
-		MeetCode:    b.MeetCode,
-		Status:      b.Status,
+		ID:                 b.ID,
+		EventTypeID:        b.EventTypeID,
+		HostID:             b.HostID,
+		GuestName:          b.GuestName,
+		GuestEmail:         b.GuestEmail,
+		StartsAt:           b.StartsAt.UTC(),
+		EndsAt:             b.EndsAt.UTC(),
+		MeetCode:           b.MeetCode,
+		Status:             b.Status,
+		CancellationReason: b.CancellationReason,
+		CancelledBy:        b.CancelledBy,
+		RoomStatus:         access.Status,
+		RoomMessage:        access.Message,
+		RoomOpensAt:        access.OpensAt,
+		RoomClosesAt:       access.ClosesAt,
+		ServerNow:          now,
 	}
 	if event != nil {
 		dto.EventTypeSlug = event.Slug
@@ -157,6 +190,27 @@ func toBookingDTO(b store.Booking, event *store.EventType, host *store.User) boo
 		dto.HostSlug = host.Slug
 	}
 	return dto
+}
+
+func BookingRoomAccessFor(b store.Booking, now time.Time, window BookingRoomWindow) bookingRoomAccess {
+	if window.OpenBefore <= 0 {
+		window.OpenBefore = 10 * time.Minute
+	}
+	if window.CloseAfter <= 0 {
+		window.CloseAfter = 30 * time.Minute
+	}
+	opensAt := b.StartsAt.UTC().Add(-window.OpenBefore)
+	closesAt := b.EndsAt.UTC().Add(window.CloseAfter)
+	if b.Status == "cancelled" {
+		return bookingRoomAccess{Status: "cancelled", Message: "This booking was cancelled.", OpensAt: opensAt, ClosesAt: closesAt}
+	}
+	if now.Before(opensAt) {
+		return bookingRoomAccess{Status: "too_early", Message: "This room is not open yet.", OpensAt: opensAt, ClosesAt: closesAt}
+	}
+	if now.After(closesAt) {
+		return bookingRoomAccess{Status: "ended", Message: "This room is no longer available.", OpensAt: opensAt, ClosesAt: closesAt}
+	}
+	return bookingRoomAccess{Status: "open", OpensAt: opensAt, ClosesAt: closesAt}
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -231,9 +285,11 @@ func handleCreateBooking(st store.Storer, deps BookingDeps) http.HandlerFunc {
 			return
 		}
 
-		// Free-plan cap. CountBookingsInMonth uses created_at (this month's
-		// quota counts bookings *taken* this month, not sessions delivered).
-		if host.Plan == "free" {
+		// Monthly booking cap. CountBookingsInMonth uses created_at (bookings
+		// *taken* this month, not sessions delivered). The limit is defined in
+		// internal/plans — change it there, not here.
+		lim := plans.For(host.Plan)
+		if lim.MonthlyBookings != plans.Unlimited {
 			now := time.Now().UTC()
 			n, err := st.CountBookingsInMonth(r.Context(), host.ID, now.Year(), now.Month())
 			if err != nil {
@@ -241,7 +297,7 @@ func handleCreateBooking(st store.Storer, deps BookingDeps) http.HandlerFunc {
 				WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not create booking")
 				return
 			}
-			if n >= freePlanMonthlyBookingLimit {
+			if plans.Exceeds(lim.MonthlyBookings, n) {
 				WriteError(w, http.StatusForbidden, "HOST_MONTHLY_CAP",
 					"this host has reached their monthly booking limit")
 				return
@@ -301,7 +357,7 @@ func handleCreateBooking(st store.Storer, deps BookingDeps) http.HandlerFunc {
 
 		sendBookingEmails(r.Context(), deps, created, event, host, guestName, guestEmail)
 
-		WriteJSON(w, http.StatusCreated, toBookingDTO(*created, event, host))
+		WriteJSON(w, http.StatusCreated, toBookingDTOWithWindow(*created, event, host, deps.RoomWindow))
 	}
 }
 
@@ -361,11 +417,19 @@ func handleHostCancelBooking(st store.Storer, deps BookingDeps, id string) http.
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if err := st.CancelBooking(r.Context(), b.ID); err != nil {
+		reason, err := readCancellationReason(r)
+		if err != nil {
+			WriteFieldError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := st.CancelBooking(r.Context(), b.ID, reason, "host"); err != nil {
 			slog.Error("bookings: host cancel", "err", err, "booking_id", b.ID, "user_id", userID)
 			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not cancel")
 			return
 		}
+		b.CancellationReason = &reason
+		cancelledBy := "host"
+		b.CancelledBy = &cancelledBy
 		host, _ := st.GetUserByID(r.Context(), b.HostID)
 		event, _ := st.GetEventType(r.Context(), b.HostID, b.EventTypeID)
 		sendCancellationEmails(r.Context(), deps, b, event, host, "host")
@@ -398,17 +462,40 @@ func handleGuestCancelBooking(st store.Storer, deps BookingDeps, code string) ht
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if err := st.CancelBooking(r.Context(), b.ID); err != nil {
+		reason, err := readCancellationReason(r)
+		if err != nil {
+			WriteFieldError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := st.CancelBooking(r.Context(), b.ID, reason, "guest"); err != nil {
 			slog.Error("bookings: guest cancel", "err", err, "booking_id", b.ID)
 			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not cancel")
 			return
 		}
+		b.CancellationReason = &reason
+		cancelledBy := "guest"
+		b.CancelledBy = &cancelledBy
 		host, _ := st.GetUserByID(r.Context(), b.HostID)
 		event, _ := st.GetEventType(r.Context(), b.HostID, b.EventTypeID)
 		sendCancellationEmails(r.Context(), deps, b, event, host, "guest")
 		slog.Info("bookings: guest cancelled", "booking_id", b.ID, "meet_code", code)
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func readCancellationReason(r *http.Request) (string, error) {
+	var req cancelBookingRequest
+	if err := BindJSON(r, &req); err != nil {
+		return "", err
+	}
+	return ValidateLen("reason", req.Reason, 3, 500)
+}
+
+func stringPtrValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 // sendCancellationEmails notifies both parties. `cancelledBy` is "host" or
@@ -419,18 +506,19 @@ func sendCancellationEmails(ctx context.Context, deps BookingDeps, b *store.Book
 		return
 	}
 	in := email.BookingInput{
-		GuestName:    b.GuestName,
-		GuestEmail:   b.GuestEmail,
-		HostName:     host.Name,
-		HostEmail:    host.Email,
-		HostTimezone: host.Timezone,
-		EventTitle:   event.Title,
-		EventMinutes: event.DurationMin,
-		StartsAt:     b.StartsAt,
-		EndsAt:       b.EndsAt,
-		MeetCode:     b.MeetCode,
-		CancelToken:  b.CancelToken,
-		PublicAppURL: deps.PublicAppURL,
+		GuestName:          b.GuestName,
+		GuestEmail:         b.GuestEmail,
+		HostName:           host.Name,
+		HostEmail:          host.Email,
+		HostTimezone:       host.Timezone,
+		EventTitle:         event.Title,
+		EventMinutes:       event.DurationMin,
+		StartsAt:           b.StartsAt,
+		EndsAt:             b.EndsAt,
+		MeetCode:           b.MeetCode,
+		CancelToken:        b.CancelToken,
+		CancellationReason: stringPtrValue(b.CancellationReason),
+		PublicAppURL:       deps.PublicAppURL,
 	}
 	sendCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
@@ -439,7 +527,7 @@ func sendCancellationEmails(ctx context.Context, deps BookingDeps, b *store.Book
 	}
 }
 
-func handleGetBooking(st store.Storer, id string) http.HandlerFunc {
+func handleGetBooking(st store.Storer, deps BookingDeps, id string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		b, err := st.GetBookingByID(r.Context(), id)
 		if err != nil {
@@ -455,11 +543,11 @@ func handleGetBooking(st store.Storer, id string) http.HandlerFunc {
 		// reveal anything beyond what the guest already knows (slug, title).
 		event, _ := st.GetEventType(r.Context(), b.HostID, b.EventTypeID)
 		host, _ := st.GetUserByID(r.Context(), b.HostID)
-		WriteJSON(w, http.StatusOK, toBookingDTO(*b, event, host))
+		WriteJSON(w, http.StatusOK, toBookingDTOWithWindow(*b, event, host, deps.RoomWindow))
 	}
 }
 
-func handleListMyBookings(st store.Storer) http.HandlerFunc {
+func handleListMyBookings(st store.Storer, window BookingRoomWindow) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, ok := auth.UserIDFromContext(r.Context())
 		if !ok {
@@ -486,7 +574,7 @@ func handleListMyBookings(st store.Storer) http.HandlerFunc {
 				ev, _ = st.GetEventType(r.Context(), userID, b.EventTypeID)
 				events[b.EventTypeID] = ev
 			}
-			out = append(out, toBookingDTO(b, ev, nil))
+			out = append(out, toBookingDTOWithWindow(b, ev, nil, window))
 		}
 		WriteJSON(w, http.StatusOK, bookingListResponse{Bookings: out})
 	}

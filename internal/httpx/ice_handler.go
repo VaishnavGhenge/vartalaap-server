@@ -12,7 +12,13 @@ import (
 	"github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 )
 
-func NewIceHandler(cf *cfturn.Client, allowedOrigins []string, limiter *RateLimiter) http.HandlerFunc {
+type RoomAccessGate func(ctx context.Context, room string, activate bool) error
+
+func NewIceHandler(cf *cfturn.Client, allowedOrigins []string, limiter *RateLimiter, gates ...RoomAccessGate) http.HandlerFunc {
+	var gate RoomAccessGate
+	if len(gates) > 0 {
+		gate = gates[0]
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !enforceAPIRequest(w, r, allowedOrigins, http.MethodPost, limiter) {
 			return
@@ -20,6 +26,19 @@ func NewIceHandler(cf *cfturn.Client, allowedOrigins []string, limiter *RateLimi
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
+		}
+		var req struct {
+			RoomID string `json:"roomId"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RoomID == "" {
+			WriteError(w, http.StatusBadRequest, "ROOM_REQUIRED", "roomId is required")
+			return
+		}
+		if gate != nil {
+			if err := gate(r.Context(), req.RoomID, false); err != nil {
+				WriteError(w, http.StatusForbidden, roomAccessCode(err), roomAccessMessage(err))
+				return
+			}
 		}
 
 		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)

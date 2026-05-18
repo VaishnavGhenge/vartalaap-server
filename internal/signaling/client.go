@@ -3,6 +3,7 @@ package signaling
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"log/slog"
 	"regexp"
@@ -22,11 +23,12 @@ const (
 var roomIDPattern = regexp.MustCompile(`^[a-z2-9]{3}-[a-z2-9]{4}-[a-z2-9]{3}$`)
 
 type Client struct {
-	id   string
-	conn *websocket.Conn
-	hub  *Hub
-	send chan []byte
-	room string
+	id       string
+	conn     *websocket.Conn
+	hub      *Hub
+	send     chan []byte
+	room     string
+	roomGate RoomGate
 
 	mu            sync.RWMutex
 	name          string
@@ -114,6 +116,20 @@ func (c *Client) handle(env *Envelope) {
 		if !roomIDPattern.MatchString(env.Room) {
 			c.sendError("invalid room")
 			return
+		}
+		if c.roomGate != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			err := c.roomGate(ctx, env.Room)
+			cancel()
+			if err != nil {
+				var gateErr *RoomGateError
+				if errors.As(err, &gateErr) {
+					c.sendErrorCode(gateErr.Code, gateErr.Message)
+				} else {
+					c.sendErrorCode("ROOM_UNAVAILABLE", "This room is not available yet.")
+				}
+				return
+			}
 		}
 		var jd JoinData
 		if len(env.Data) > 0 {
@@ -291,7 +307,10 @@ func (c *Client) enqueueBestEffort(msg []byte) bool {
 }
 
 func (c *Client) sendError(msg string) {
-	data, _ := json.Marshal(ErrorData{Message: msg})
-	c.sendJSON(&Envelope{Type: MsgError, Data: data})
+	c.sendErrorCode("", msg)
 }
 
+func (c *Client) sendErrorCode(code, msg string) {
+	data, _ := json.Marshal(ErrorData{Message: msg, Code: code})
+	c.sendJSON(&Envelope{Type: MsgError, Data: data})
+}

@@ -19,8 +19,12 @@ import (
 // (see partytracks/client). The roomId/peerId for a session are passed via
 // query params on /sfu/sessions/new so partytracks doesn't need to know
 // about our room model.
-func SFUHandlers(mux *http.ServeMux, hub *signaling.Hub, registry *sfu.Registry, cf *cfrealtime.Client, cfg AuthConfig) {
+func SFUHandlers(mux *http.ServeMux, hub *signaling.Hub, registry *sfu.Registry, cf *cfrealtime.Client, cfg AuthConfig, gates ...RoomAccessGate) {
 	lim := NewRateLimiter(60, 120)
+	var gate RoomAccessGate
+	if len(gates) > 0 {
+		gate = gates[0]
+	}
 
 	wrap := func(method string, h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -33,10 +37,10 @@ func SFUHandlers(mux *http.ServeMux, hub *signaling.Hub, registry *sfu.Registry,
 		}
 	}
 
-	mux.HandleFunc("/sfu/sessions/", wrap("POST, PUT, DELETE", handleSFUSessionRoute(hub, registry, cf)))
+	mux.HandleFunc("/sfu/sessions/", wrap("POST, PUT, DELETE", handleSFUSessionRoute(hub, registry, cf, gate)))
 }
 
-func handleSFUCreateSession(registry *sfu.Registry, cf *cfrealtime.Client) http.HandlerFunc {
+func handleSFUCreateSession(registry *sfu.Registry, cf *cfrealtime.Client, gate RoomAccessGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -54,6 +58,12 @@ func handleSFUCreateSession(registry *sfu.Registry, cf *cfrealtime.Client) http.
 		if roomID == "" || peerID == "" {
 			http.Error(w, "roomId and peerId query params are required", http.StatusBadRequest)
 			return
+		}
+		if gate != nil {
+			if err := gate(r.Context(), roomID, false); err != nil {
+				WriteError(w, http.StatusForbidden, roomAccessCode(err), roomAccessMessage(err))
+				return
+			}
 		}
 
 		sessionID, err := cf.CreateSession(r.Context())
@@ -74,7 +84,7 @@ func handleSFUCreateSession(registry *sfu.Registry, cf *cfrealtime.Client) http.
 
 // handleSFUSessionRoute dispatches sub-paths under /sfu/sessions/{id}/...
 // Also handles /sfu/sessions/new which creates a new session.
-func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrealtime.Client) http.HandlerFunc {
+func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrealtime.Client, gate RoomAccessGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tail := strings.TrimPrefix(r.URL.Path, "/sfu/sessions/")
 		parts := strings.SplitN(tail, "/", 2)
@@ -90,7 +100,7 @@ func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrea
 
 		// partytracks creates sessions at POST /sfu/sessions/new.
 		if sessionID == "new" && subPath == "" && r.Method == http.MethodPost {
-			handleSFUCreateSession(registry, cf)(w, r)
+			handleSFUCreateSession(registry, cf, gate)(w, r)
 			return
 		}
 
@@ -99,6 +109,12 @@ func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrea
 		if !ok || ownerID != userID {
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
+		}
+		if gate != nil {
+			if err := gate(r.Context(), roomID, false); err != nil {
+				WriteError(w, http.StatusForbidden, roomAccessCode(err), roomAccessMessage(err))
+				return
+			}
 		}
 
 		switch {

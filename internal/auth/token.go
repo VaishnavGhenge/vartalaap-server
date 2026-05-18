@@ -38,8 +38,11 @@ func VerifyAccessToken(tokenStr, secret string) (*Claims, error) {
 		return nil, err
 	}
 	claims, ok := t.Claims.(*Claims)
-	if !ok {
+	if !ok || !t.Valid {
 		return nil, fmt.Errorf("invalid claims")
+	}
+	if claims.UserID == "" {
+		return nil, fmt.Errorf("missing user id")
 	}
 	return claims, nil
 }

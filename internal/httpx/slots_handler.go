@@ -74,7 +74,7 @@ func SlotHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, deps Book
 			bookingsRoute(cfg, "GET, DELETE", nil,
 				func(w http.ResponseWriter, r *http.Request) {})(w, r)
 		case http.MethodGet:
-			bookingsRoute(cfg, http.MethodGet, lim, handleGetBookingByMeetCode(st, code))(w, r)
+			bookingsRoute(cfg, http.MethodGet, lim, handleGetBookingByMeetCode(st, deps, code))(w, r)
 		case http.MethodDelete:
 			// Guest-side cancel. Tighter rate limit because this is the one
 			// public mutation we expose under a meet-code-based auth model.
@@ -119,6 +119,7 @@ type hostProfileResponse struct {
 	Name       string           `json:"name"`
 	Slug       string           `json:"slug"`
 	Timezone   string           `json:"timezone"`
+	AvatarURL  *string          `json:"avatarUrl,omitempty"`
 	EventTypes []publicEventDTO `json:"eventTypes"`
 }
 
@@ -128,9 +129,10 @@ type publicEventResponse struct {
 }
 
 type hostProfileMini struct {
-	Name     string `json:"name"`
-	Slug     string `json:"slug"`
-	Timezone string `json:"timezone"`
+	Name      string  `json:"name"`
+	Slug      string  `json:"slug"`
+	Timezone  string  `json:"timezone"`
+	AvatarURL *string `json:"avatarUrl,omitempty"`
 }
 
 func toPublicEventDTO(e store.EventType) publicEventDTO {
@@ -169,6 +171,7 @@ func handleGetHostProfile(st store.Storer, hostSlug string) http.HandlerFunc {
 			Name:       host.Name,
 			Slug:       host.Slug,
 			Timezone:   host.Timezone,
+			AvatarURL:  host.AvatarURL,
 			EventTypes: make([]publicEventDTO, 0, len(events)),
 		}
 		for _, e := range events {
@@ -196,6 +199,7 @@ func handleGetPublicEvent(st store.Storer, hostSlug, eventSlug string) http.Hand
 		WriteJSON(w, http.StatusOK, publicEventResponse{
 			Host: hostProfileMini{
 				Name: host.Name, Slug: host.Slug, Timezone: host.Timezone,
+				AvatarURL: host.AvatarURL,
 			},
 			Event: toPublicEventDTO(*event),
 		})
@@ -205,7 +209,7 @@ func handleGetPublicEvent(st store.Storer, hostSlug, eventSlug string) http.Hand
 // handleGetBookingByMeetCode serves GET /m/{code} — the public confirmation
 // page reads here to show "you're booked with X at Y". The response is
 // deliberately narrow: only what the guest already knows or needs to display.
-func handleGetBookingByMeetCode(st store.Storer, code string) http.HandlerFunc {
+func handleGetBookingByMeetCode(st store.Storer, deps BookingDeps, code string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		b, err := st.GetBookingByMeetCode(r.Context(), code)
 		if err != nil {
@@ -219,17 +223,17 @@ func handleGetBookingByMeetCode(st store.Storer, code string) http.HandlerFunc {
 		}
 		event, _ := st.GetEventType(r.Context(), b.HostID, b.EventTypeID)
 		host, _ := st.GetUserByID(r.Context(), b.HostID)
-		WriteJSON(w, http.StatusOK, toBookingDTO(*b, event, host))
+		WriteJSON(w, http.StatusOK, toBookingDTOWithWindow(*b, event, host, deps.RoomWindow))
 	}
 }
 
 type slotsResponse struct {
-	EventTypeID   string    `json:"eventTypeId"`
-	EventTitle    string    `json:"eventTitle"`
-	DurationMin   int       `json:"durationMin"`
-	HostName      string    `json:"hostName"`
-	HostTimezone  string    `json:"hostTimezone"`
-	Slots         []string  `json:"slots"` // RFC3339 in UTC; client formats per its own tz
+	EventTypeID  string   `json:"eventTypeId"`
+	EventTitle   string   `json:"eventTitle"`
+	DurationMin  int      `json:"durationMin"`
+	HostName     string   `json:"hostName"`
+	HostTimezone string   `json:"hostTimezone"`
+	Slots        []string `json:"slots"` // RFC3339 in UTC; client formats per its own tz
 }
 
 func handleListSlots(st store.Storer, hostSlug, eventSlug string) http.HandlerFunc {
@@ -363,8 +367,22 @@ func generateSlots(
 		return nil
 	}
 	duration := time.Duration(event.DurationMin) * time.Minute
-	buffer := time.Duration(event.BufferMin) * time.Minute
-	cadence := duration + buffer
+	bufferAfter := time.Duration(event.BufferMin) * time.Minute
+	bufferBefore := time.Duration(event.BufferBeforeMin) * time.Minute
+	cadence := bufferBefore + duration + bufferAfter
+
+	// Earliest bookable moment: now + min notice window.
+	earliestSlot := nowUTC
+	if event.MinNoticeHours > 0 {
+		earliestSlot = nowUTC.Add(time.Duration(event.MinNoticeHours) * time.Hour)
+	}
+	// Latest bookable moment: cap toUTC if max_days_ahead is set.
+	if event.MaxDaysAhead > 0 {
+		maxTo := nowUTC.AddDate(0, 0, event.MaxDaysAhead)
+		if toUTC.After(maxTo) {
+			toUTC = maxTo
+		}
+	}
 
 	// Bucket rules by day-of-week so the per-day walk is O(rules-for-this-day)
 	// not O(all-rules) per iteration.
@@ -404,7 +422,7 @@ func generateSlots(
 
 			for slot := start; !slot.Add(duration).After(end); slot = slot.Add(cadence) {
 				slotUTC := slot.UTC()
-				if slotUTC.Before(nowUTC) {
+				if slotUTC.Before(earliestSlot) {
 					continue
 				}
 				// Restrict to the requested outer range so weekday rules that
@@ -413,7 +431,7 @@ func generateSlots(
 				if slotUTC.Before(fromUTC) || !slotUTC.Before(toUTC) {
 					continue
 				}
-				if isSlotConflicted(slotUTC, duration, buffer, bookings) {
+				if isSlotConflicted(slotUTC, duration, bufferBefore, bufferAfter, bookings) {
 					continue
 				}
 				out = append(out, slotUTC)
@@ -438,14 +456,16 @@ func combineDateTime(localMidnight time.Time, hhmm string, loc *time.Location) t
 }
 
 // isSlotConflicted returns true when the candidate slot [slotUTC, slotUTC+duration]
-// would collide with any booking (including the booking's buffer on either side).
-func isSlotConflicted(slotUTC time.Time, duration, buffer time.Duration, bookings []store.Booking) bool {
-	slotStart := slotUTC
-	slotEnd := slotUTC.Add(duration)
+// would collide with any booking, accounting for asymmetric buffers:
+// bufferBefore is the required gap before the new slot starts,
+// bufferAfter is the required gap after any existing booking ends.
+func isSlotConflicted(slotUTC time.Time, duration, bufferBefore, bufferAfter time.Duration, bookings []store.Booking) bool {
+	slotStart := slotUTC.Add(-bufferBefore)
+	slotEnd := slotUTC.Add(duration).Add(bufferAfter)
 	for _, b := range bookings {
-		bStart := b.StartsAt.Add(-buffer)
-		bEnd := b.EndsAt.Add(buffer)
-		// Half-open overlap: any sliver of contact disqualifies the slot.
+		// Existing booking occupies [start-bufferBefore, end+bufferAfter].
+		bStart := b.StartsAt.Add(-bufferBefore)
+		bEnd := b.EndsAt.Add(bufferAfter)
 		if slotStart.Before(bEnd) && slotEnd.After(bStart) {
 			return true
 		}
@@ -461,16 +481,14 @@ func isSlotConflicted(slotUTC time.Time, duration, buffer time.Duration, booking
 // Returns nil when the slot is clear and a non-nil sentinel-equivalent error
 // otherwise.
 func checkBookingConflict(ctx context.Context, st store.Storer, event store.EventType, startsAt, endsAt time.Time) error {
-	buffer := time.Duration(event.BufferMin) * time.Minute
-	// Query a window large enough to catch any booking whose buffer touches
-	// ours. starts_at < endsAt+buffer AND ends_at > startsAt-buffer covers
-	// every collision case.
+	bufferBefore := time.Duration(event.BufferBeforeMin) * time.Minute
+	bufferAfter := time.Duration(event.BufferMin) * time.Minute
 	bookings, err := st.ListBookingsForEventInRange(ctx, event.ID,
-		startsAt.Add(-buffer), endsAt.Add(buffer))
+		startsAt.Add(-bufferBefore), endsAt.Add(bufferAfter))
 	if err != nil {
 		return err
 	}
-	if isSlotConflicted(startsAt, endsAt.Sub(startsAt), buffer, bookings) {
+	if isSlotConflicted(startsAt, endsAt.Sub(startsAt), bufferBefore, bufferAfter, bookings) {
 		return errSlotTaken
 	}
 	return nil
@@ -502,13 +520,13 @@ func mergeBookingsAndHolds(bookings []store.Booking, holds []store.SlotHold) []s
 // caller skip a specific hold — used by POST /bookings when the guest is
 // converting their own hold into a booking.
 func checkHoldConflict(ctx context.Context, st store.Storer, hostID string, event store.EventType, startsAt, endsAt time.Time, ignoreToken string) error {
-	buffer := time.Duration(event.BufferMin) * time.Minute
+	bufferBefore := time.Duration(event.BufferBeforeMin) * time.Minute
+	bufferAfter := time.Duration(event.BufferMin) * time.Minute
 	holds, err := st.ListActiveHoldsForHostInRange(ctx, hostID,
-		startsAt.Add(-buffer), endsAt.Add(buffer))
+		startsAt.Add(-bufferBefore), endsAt.Add(bufferAfter))
 	if err != nil {
 		return err
 	}
-	// Convert to the booking-shape isSlotConflicted expects.
 	asBookings := make([]store.Booking, 0, len(holds))
 	for _, h := range holds {
 		if ignoreToken != "" && h.Token == ignoreToken {
@@ -518,7 +536,7 @@ func checkHoldConflict(ctx context.Context, st store.Storer, hostID string, even
 			StartsAt: h.StartsAt, EndsAt: h.EndsAt,
 		})
 	}
-	if isSlotConflicted(startsAt, endsAt.Sub(startsAt), buffer, asBookings) {
+	if isSlotConflicted(startsAt, endsAt.Sub(startsAt), bufferBefore, bufferAfter, asBookings) {
 		return errSlotTaken
 	}
 	return nil

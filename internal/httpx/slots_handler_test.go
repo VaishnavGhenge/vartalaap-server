@@ -56,7 +56,7 @@ func dispatchPublicWithDeps(st store.Storer, deps BookingDeps, w http.ResponseWr
 		code := strings.TrimPrefix(path, "/m/")
 		switch r.Method {
 		case http.MethodGet:
-			handleGetBookingByMeetCode(st, code)(w, r)
+			handleGetBookingByMeetCode(st, deps, code)(w, r)
 		case http.MethodDelete:
 			handleGuestCancelBooking(st, deps, code)(w, r)
 		default:
@@ -88,8 +88,21 @@ func dispatchPublicWithDeps(st store.Storer, deps BookingDeps, w http.ResponseWr
 // publicReq builds a GET request with the API origin so origin checks (if any
 // get added to the public routes later) keep passing without test churn.
 func publicReq(method, path string) *http.Request {
-	r := httptest.NewRequest(method, path, nil)
+	return publicReqWithBody(method, path, "")
+}
+
+func publicReqWithBody(method, path, body string) *http.Request {
+	var reader *strings.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	} else {
+		reader = strings.NewReader("")
+	}
+	r := httptest.NewRequest(method, path, reader)
 	r.Header.Set("Origin", "https://app.vartalaap.test")
+	if body != "" {
+		r.Header.Set("Content-Type", "application/json")
+	}
 	return r
 }
 
@@ -288,12 +301,12 @@ func TestIsSlotConflicted_HalfOpenOverlap(t *testing.T) {
 		EndsAt:   time.Date(2026, 5, 18, 11, 0, 0, 0, time.UTC),
 	}
 	// No buffer, touching at 10:30 — half-open means clear.
-	if isSlotConflicted(slot, duration, 0, []store.Booking{booking}) {
+	if isSlotConflicted(slot, duration, 0, 0, []store.Booking{booking}) {
 		t.Fatalf("touching ends should not collide under half-open rule")
 	}
-	// 15m buffer extends booking start back to 10:15 — now we overlap.
-	if !isSlotConflicted(slot, duration, 15*time.Minute, []store.Booking{booking}) {
-		t.Fatalf("buffer should cause overlap")
+	// 15m bufferAfter extends booking end forward to 11:15 — now we overlap.
+	if !isSlotConflicted(slot, duration, 0, 15*time.Minute, []store.Booking{booking}) {
+		t.Fatalf("bufferAfter should cause overlap")
 	}
 }
 
@@ -599,6 +612,7 @@ func seedBooking(t *testing.T, st *memStore) (*store.Booking, *store.User, *stor
 		GuestName: "Pat", GuestEmail: "pat@example.com",
 		StartsAt: start, EndsAt: start.Add(30 * time.Minute),
 		MeetCode: "can-celab-le1", Status: "confirmed",
+		CancelToken: "cancel-token-123",
 	})
 	if err != nil {
 		t.Fatalf("seed booking: %v", err)
@@ -613,7 +627,7 @@ func TestGuestCancel_HappyPath(t *testing.T) {
 	deps := BookingDeps{Mailer: mailer, PublicAppURL: "https://app.test"}
 
 	rec := httptest.NewRecorder()
-	dispatchPublicWithDeps(st, deps, rec, publicReq(http.MethodDelete, "/m/"+b.MeetCode))
+	dispatchPublicWithDeps(st, deps, rec, publicReqWithBody(http.MethodDelete, "/m/"+b.MeetCode+"?t="+b.CancelToken, `{"reason":"Schedule changed"}`))
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("want 204, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -622,9 +636,18 @@ func TestGuestCancel_HappyPath(t *testing.T) {
 	if got.Status != "cancelled" {
 		t.Fatalf("want status=cancelled, got %q", got.Status)
 	}
+	if got.CancellationReason == nil || *got.CancellationReason != "Schedule changed" {
+		t.Fatalf("want cancellation reason, got %#v", got.CancellationReason)
+	}
+	if got.CancelledBy == nil || *got.CancelledBy != "guest" {
+		t.Fatalf("want cancelled_by=guest, got %#v", got.CancelledBy)
+	}
 	// Email fired with both recipients.
 	if msgs := mailer.Messages(); len(msgs) != 1 || len(msgs[0].To) != 2 {
 		t.Fatalf("expected 1 cancellation email to both parties, got %+v", msgs)
+	}
+	if !strings.Contains(mailer.Messages()[0].TextBody, "Reason: Schedule changed") {
+		t.Fatalf("expected cancellation reason in email, got %q", mailer.Messages()[0].TextBody)
 	}
 }
 
@@ -644,7 +667,7 @@ func TestGuestCancel_Idempotent(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		rec := httptest.NewRecorder()
-		dispatchPublicWithDeps(st, deps, rec, publicReq(http.MethodDelete, "/m/"+b.MeetCode))
+		dispatchPublicWithDeps(st, deps, rec, publicReqWithBody(http.MethodDelete, "/m/"+b.MeetCode+"?t="+b.CancelToken, `{"reason":"Schedule changed"}`))
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("cancel attempt %d: want 204, got %d", i, rec.Code)
 		}
@@ -657,7 +680,7 @@ func TestHostCancel_HappyPath(t *testing.T) {
 	mailer := &recordingMailer{}
 	deps := BookingDeps{Mailer: mailer, PublicAppURL: "https://app.test"}
 
-	req := authReq(http.MethodDelete, "/bookings/"+b.ID, "")
+	req := authReq(http.MethodDelete, "/bookings/"+b.ID, `{"reason":"Client requested a new time"}`)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rec := httptest.NewRecorder()
 	RequireAuth(testSecret, handleHostCancelBooking(st, deps, b.ID))(rec, req)
@@ -667,6 +690,12 @@ func TestHostCancel_HappyPath(t *testing.T) {
 	got, _ := st.GetBookingByID(context.Background(), b.ID)
 	if got.Status != "cancelled" {
 		t.Fatalf("want cancelled, got %q", got.Status)
+	}
+	if got.CancellationReason == nil || *got.CancellationReason != "Client requested a new time" {
+		t.Fatalf("want cancellation reason, got %#v", got.CancellationReason)
+	}
+	if got.CancelledBy == nil || *got.CancelledBy != "host" {
+		t.Fatalf("want cancelled_by=host, got %#v", got.CancelledBy)
 	}
 }
 
@@ -696,7 +725,7 @@ func TestCancelledSlotBecomesBookableAgain(t *testing.T) {
 	st := newMemStore()
 	b, host, event, _ := seedBooking(t, st)
 	// Cancel it.
-	if err := st.CancelBooking(context.Background(), b.ID); err != nil {
+	if err := st.CancelBooking(context.Background(), b.ID, "No longer needed", "host"); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	// Re-booking the exact same slot via POST /bookings must succeed.

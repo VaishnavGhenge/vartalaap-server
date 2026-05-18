@@ -79,6 +79,7 @@ type PeerStateData struct {
 
 type ErrorData struct {
 	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
 }
 
 type StatsReportPeer struct {
@@ -116,10 +117,10 @@ type StatsReportData struct {
 // Unknown names are dropped with a debug log so a buggy client can't pollute
 // the histogram registry.
 type ClientMetricData struct {
-	Name    string  `json:"name"`
-	Value   float64 `json:"value"`
-	Phase   string  `json:"phase,omitempty"`
-	Result  string  `json:"result,omitempty"`
+	Name   string  `json:"name"`
+	Value  float64 `json:"value"`
+	Phase  string  `json:"phase,omitempty"`
+	Result string  `json:"result,omitempty"`
 }
 
 type SfuTrackInfo struct {

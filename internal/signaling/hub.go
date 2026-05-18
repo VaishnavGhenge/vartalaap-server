@@ -11,12 +11,19 @@ import (
 )
 
 type Hub struct {
-	mu    sync.Mutex
-	rooms map[string]*Room
+	mu          sync.Mutex
+	rooms       map[string]*Room
+	onRoomEmpty func(roomID string)
 }
 
 func NewHub() *Hub {
 	return &Hub{rooms: make(map[string]*Room)}
+}
+
+func (h *Hub) SetRoomEmptyHandler(handler func(roomID string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onRoomEmpty = handler
 }
 
 func (h *Hub) join(c *Client, roomID string) {
@@ -151,6 +158,9 @@ func (h *Hub) gcLocked(r *Room) {
 	if r.empty() {
 		delete(h.rooms, r.id)
 		metrics.ActiveRooms.Dec()
+		if h.onRoomEmpty != nil {
+			go h.onRoomEmpty(r.id)
+		}
 	}
 }
 

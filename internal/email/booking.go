@@ -13,16 +13,17 @@ import (
 // so the email package doesn't import store/* (and so test fixtures stay
 // tiny). The caller in httpx fills this from store.Booking + lookups.
 type BookingInput struct {
-	GuestName    string
-	GuestEmail   string
-	HostName     string
-	HostEmail    string
-	HostTimezone string
-	EventTitle   string
-	EventMinutes int
-	StartsAt     time.Time
-	EndsAt       time.Time
-	MeetCode     string
+	GuestName          string
+	GuestEmail         string
+	HostName           string
+	HostEmail          string
+	HostTimezone       string
+	EventTitle         string
+	EventMinutes       int
+	StartsAt           time.Time
+	EndsAt             time.Time
+	MeetCode           string
+	CancellationReason string
 	// CancelToken is the magic-link credential included on the booking-page
 	// URL the guest receives. Optional in case the caller doesn't have one
 	// (e.g. host notification where we don't expose the guest's cancel link).
@@ -139,6 +140,7 @@ func RenderBookingCancellation(in BookingInput, from, cancelledBy string) Messag
 		fmt.Sprintf("Event: %s (%d min)", in.EventTitle, in.EventMinutes),
 		fmt.Sprintf("When:  %s", when),
 		fmt.Sprintf("With:  %s and %s", in.HostName, in.GuestName),
+		fmt.Sprintf("Reason: %s", cancellationReason(in)),
 	}, "\n")
 	htmlBody := renderHTML(map[string]string{
 		"CancelledBy": html.EscapeString(byLabel),
@@ -147,6 +149,7 @@ func RenderBookingCancellation(in BookingInput, from, cancelledBy string) Messag
 		"When":        html.EscapeString(when),
 		"HostName":    html.EscapeString(in.HostName),
 		"GuestName":   html.EscapeString(in.GuestName),
+		"Reason":      html.EscapeString(cancellationReason(in)),
 	}, cancelHTML)
 	// Recipient = both. Most SMTP providers handle multi-recipient sends
 	// fine; if your provider can't, split into two Send calls upstream.
@@ -163,18 +166,85 @@ func RenderBookingCancellation(in BookingInput, from, cancelledBy string) Messag
 	}
 }
 
-const cancelHTML = `<!doctype html>
-<html><body style="font-family:system-ui,sans-serif;line-height:1.5;color:#1a1a1a">
-<table cellpadding="0" cellspacing="0" style="max-width:520px;margin:24px auto;padding:24px;border:1px solid #eee;border-radius:12px">
-<tr><td>
-<h2 style="margin:0 0 8px;font-weight:600">Booking cancelled</h2>
-<p style="margin:0 0 16px;color:#666">{{.EventTitle}} · {{.Duration}}</p>
-<p style="margin:0 0 4px"><strong>When:</strong> {{.When}}</p>
-<p style="margin:0 0 4px"><strong>With:</strong> {{.HostName}} and {{.GuestName}}</p>
-<p style="margin:16px 0 0;color:#888;font-size:13px">Cancelled by the {{.CancelledBy}}.</p>
+var cancelHTML = emailWrap(`
+<tr>
+  <td style="padding:20px 32px 8px">
+    <p style="margin:0 0 6px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#ef4444">Cancelled</p>
+    <h2 style="margin:0 0 6px;font-size:22px;font-weight:700;color:#111827;line-height:1.3">{{.EventTitle}}</h2>
+    <p style="margin:0;font-size:14px;color:#6b7280">{{.Duration}} &middot; cancelled by the {{.CancelledBy}}</p>
+  </td>
+</tr>
+<tr>
+  <td style="padding:16px 32px 24px">
+    <table cellpadding="0" cellspacing="0" width="100%" style="background:#f9fafb;border-radius:10px;border:1px solid #e5e7eb">
+      <tr>
+        <td style="padding:16px 20px">
+          <table cellpadding="0" cellspacing="0" width="100%">
+            <tr>
+              <td style="padding:4px 0"><span style="font-size:12px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.05em">WHEN</span><br><span style="font-size:14px;color:#111827">{{.When}}</span></td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0 4px;border-top:1px solid #e5e7eb"><span style="font-size:12px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.05em">PARTICIPANTS</span><br><span style="font-size:14px;color:#111827">{{.HostName}} &amp; {{.GuestName}}</span></td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0 4px;border-top:1px solid #e5e7eb"><span style="font-size:12px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.05em">REASON</span><br><span style="font-size:14px;color:#111827">{{.Reason}}</span></td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </td>
+</tr>
+`)
+
+func cancellationReason(in BookingInput) string {
+	if in.CancellationReason == "" {
+		return "No reason provided"
+	}
+	return in.CancellationReason
+}
+
+const logoHeader = `
+  <!-- Sessionly logo header -->
+  <tr>
+    <td style="padding:24px 32px 20px;border-bottom:1px solid #f3f4f6">
+      <table cellpadding="0" cellspacing="0"><tr>
+        <td width="36" height="36" align="center" valign="middle" style="background:#4f46e5;border-radius:9px;line-height:0">
+          <svg width="23" height="23" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M9.25 11.25h13.5" stroke="white" stroke-linecap="round" stroke-width="2.25" opacity="0.7"/>
+            <path d="M12 8.5v5M20 8.5v5" stroke="white" stroke-linecap="round" stroke-width="2.25" opacity="0.78"/>
+            <path d="M8.5 17.2c0-1.2.97-2.17 2.17-2.17h7.35c1.2 0 2.17.97 2.17 2.17v.3l3.88-2.12c.63-.34 1.4.11 1.4.83v7.08c0 .72-.77 1.17-1.4.83L20.19 22v.3c0 1.2-.97 2.17-2.17 2.17h-7.35A2.17 2.17 0 0 1 8.5 22.3v-5.1Z" fill="white"/>
+          </svg>
+        </td>
+        <td style="padding-left:10px;vertical-align:middle">
+          <span style="font-size:18px;font-weight:700;color:#4f46e5;letter-spacing:-0.02em;line-height:1">Session<span style="opacity:0.4">ly</span></span>
+        </td>
+      </tr></table>
+    </td>
+  </tr>`
+
+const logoFooter = `
+  <!-- Footer -->
+  <tr>
+    <td style="padding:14px 32px;border-top:1px solid #f3f4f6;background-color:#fafafa;text-align:center">
+      <a href="https://getsessionly.com" style="font-size:12px;color:#9ca3af;text-decoration:none">getsessionly.com</a>
+    </td>
+  </tr>`
+
+func emailWrap(body string) string {
+	return `<!doctype html>
+<html lang="en">
+<head><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"></head>
+<body style="margin:0;padding:0;background-color:#f3f4f6;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased">
+<table cellpadding="0" cellspacing="0" width="100%" style="background-color:#f3f4f6;padding:32px 16px">
+<tr><td align="center">
+<table cellpadding="0" cellspacing="0" width="520" style="max-width:520px;background:#ffffff;border-radius:16px;border:1px solid #e5e7eb;overflow:hidden">
+` + logoHeader + body + logoFooter + `
+</table>
 </td></tr>
 </table>
 </body></html>`
+}
 
 // BuildICS produces a minimal RFC 5545 VEVENT. We keep it static — no
 // VTIMEZONE block — by emitting DTSTART/DTEND in UTC. Calendar apps render
@@ -259,29 +329,79 @@ func renderHTML(vars map[string]string, template string) string {
 	return out
 }
 
-const guestHTML = `<!doctype html>
-<html><body style="font-family:system-ui,sans-serif;line-height:1.5;color:#1a1a1a">
-<table cellpadding="0" cellspacing="0" style="max-width:520px;margin:24px auto;padding:24px;border:1px solid #eee;border-radius:12px">
-<tr><td>
-<h2 style="margin:0 0 8px;font-weight:600">You're booked with {{.HostName}}</h2>
-<p style="margin:0 0 16px;color:#666">{{.EventTitle}} · {{.Duration}}</p>
-<p style="margin:0 0 4px"><strong>When:</strong> {{.When}}</p>
-<p style="margin:0 0 16px"><strong>Where:</strong> <a href="{{.RoomURL}}">{{.RoomURL}}</a></p>
-<p style="margin:0 0 4px;color:#666">Meet code: <code>{{.MeetCode}}</code></p>
-<p style="margin:16px 0 0;color:#888;font-size:13px">The room opens at the booked time. Need to <a href="{{.ConfirmURL}}">manage or cancel</a> this booking? Use that link — it's tied to this email.</p>
-</td></tr>
-</table>
-</body></html>`
+var guestHTML = emailWrap(`
+<tr>
+  <td style="padding:20px 32px 8px">
+    <p style="margin:0 0 6px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#4f46e5">Confirmed</p>
+    <h2 style="margin:0 0 6px;font-size:22px;font-weight:700;color:#111827;line-height:1.3">You're booked with {{.HostName}}</h2>
+    <p style="margin:0;font-size:14px;color:#6b7280">{{.EventTitle}} &middot; {{.Duration}}</p>
+  </td>
+</tr>
+<tr>
+  <td style="padding:16px 32px 20px">
+    <table cellpadding="0" cellspacing="0" width="100%" style="background:#f9fafb;border-radius:10px;border:1px solid #e5e7eb">
+      <tr><td style="padding:16px 20px">
+        <table cellpadding="0" cellspacing="0" width="100%">
+          <tr><td style="padding:4px 0 10px">
+            <span style="font-size:11px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.06em">WHEN</span><br>
+            <span style="font-size:14px;color:#111827">{{.When}}</span>
+          </td></tr>
+          <tr><td style="padding:10px 0 4px;border-top:1px solid #e5e7eb">
+            <span style="font-size:11px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.06em">MEET CODE</span><br>
+            <span style="font-size:14px;font-family:monospace;color:#111827;letter-spacing:0.08em">{{.MeetCode}}</span>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </td>
+</tr>
+<tr>
+  <td style="padding:0 32px 24px;text-align:center">
+    <table cellpadding="0" cellspacing="0" style="margin:0 auto">
+      <tr><td style="background:#4f46e5;border-radius:8px;padding:13px 28px">
+        <a href="{{.RoomURL}}" style="color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;letter-spacing:-0.01em">Join meeting &#8594;</a>
+      </td></tr>
+    </table>
+    <p style="margin:14px 0 0;font-size:12px;color:#9ca3af">
+      The room opens at the booked time. Need to <a href="{{.ConfirmURL}}" style="color:#6b7280;text-decoration:underline">manage or cancel</a>?
+    </p>
+  </td>
+</tr>
+`)
 
-const hostHTML = `<!doctype html>
-<html><body style="font-family:system-ui,sans-serif;line-height:1.5;color:#1a1a1a">
-<table cellpadding="0" cellspacing="0" style="max-width:520px;margin:24px auto;padding:24px;border:1px solid #eee;border-radius:12px">
-<tr><td>
-<h2 style="margin:0 0 8px;font-weight:600">New booking</h2>
-<p style="margin:0 0 16px;color:#666">{{.EventTitle}} · {{.Duration}}</p>
-<p style="margin:0 0 4px"><strong>Guest:</strong> {{.GuestName}} &lt;{{.GuestEmail}}&gt;</p>
-<p style="margin:0 0 4px"><strong>When:</strong> {{.When}}</p>
-<p style="margin:0 0 16px"><strong>Room:</strong> <a href="{{.RoomURL}}">{{.RoomURL}}</a></p>
-</td></tr>
-</table>
-</body></html>`
+var hostHTML = emailWrap(`
+<tr>
+  <td style="padding:20px 32px 8px">
+    <p style="margin:0 0 6px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#4f46e5">New booking</p>
+    <h2 style="margin:0 0 6px;font-size:22px;font-weight:700;color:#111827;line-height:1.3">{{.EventTitle}}</h2>
+    <p style="margin:0;font-size:14px;color:#6b7280">{{.Duration}} with {{.GuestName}}</p>
+  </td>
+</tr>
+<tr>
+  <td style="padding:16px 32px 20px">
+    <table cellpadding="0" cellspacing="0" width="100%" style="background:#f9fafb;border-radius:10px;border:1px solid #e5e7eb">
+      <tr><td style="padding:16px 20px">
+        <table cellpadding="0" cellspacing="0" width="100%">
+          <tr><td style="padding:4px 0 10px">
+            <span style="font-size:11px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.06em">WHEN</span><br>
+            <span style="font-size:14px;color:#111827">{{.When}}</span>
+          </td></tr>
+          <tr><td style="padding:10px 0 4px;border-top:1px solid #e5e7eb">
+            <span style="font-size:11px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.06em">GUEST</span><br>
+            <span style="font-size:14px;color:#111827">{{.GuestName}} &lt;<a href="mailto:{{.GuestEmail}}" style="color:#4f46e5;text-decoration:none">{{.GuestEmail}}</a>&gt;</span>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </td>
+</tr>
+<tr>
+  <td style="padding:0 32px 24px;text-align:center">
+    <table cellpadding="0" cellspacing="0" style="margin:0 auto">
+      <tr><td style="background:#4f46e5;border-radius:8px;padding:13px 28px">
+        <a href="{{.RoomURL}}" style="color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;letter-spacing:-0.01em">Open room &#8594;</a>
+      </td></tr>
+    </table>
+  </td>
+</tr>
+`)

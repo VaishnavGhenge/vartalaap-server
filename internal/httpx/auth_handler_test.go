@@ -18,27 +18,27 @@ import (
 
 // memStore is an in-memory implementation of store.Storer for tests.
 type memStore struct {
-	mu     sync.Mutex
-	users  map[string]*store.User  // key: id
-	byEmail map[string]string       // email -> id
-	tokens map[string]*store.RefreshToken // key: tokenHash
-	avail  map[string][]store.AvailabilityRule // hostID -> rules
-	events map[string]*store.EventType // key: event id
-	bookings map[string]*store.Booking // key: booking id
-	holds  map[string]*store.SlotHold  // key: hold token
-	nextID int
-	nextAvailID int
-	nextEventID int
+	mu            sync.Mutex
+	users         map[string]*store.User              // key: id
+	byEmail       map[string]string                   // email -> id
+	tokens        map[string]*store.RefreshToken      // key: tokenHash
+	avail         map[string][]store.AvailabilityRule // hostID -> rules
+	events        map[string]*store.EventType         // key: event id
+	bookings      map[string]*store.Booking           // key: booking id
+	holds         map[string]*store.SlotHold          // key: hold token
+	nextID        int
+	nextAvailID   int
+	nextEventID   int
 	nextBookingID int
-	nextHoldID int
+	nextHoldID    int
 }
 
 func newMemStore() *memStore {
 	return &memStore{
-		users:   make(map[string]*store.User),
-		byEmail: make(map[string]string),
-		tokens:  make(map[string]*store.RefreshToken),
-		avail:   make(map[string][]store.AvailabilityRule),
+		users:    make(map[string]*store.User),
+		byEmail:  make(map[string]string),
+		tokens:   make(map[string]*store.RefreshToken),
+		avail:    make(map[string][]store.AvailabilityRule),
 		events:   make(map[string]*store.EventType),
 		bookings: make(map[string]*store.Booking),
 		holds:    make(map[string]*store.SlotHold),
@@ -65,8 +65,8 @@ func (m *memStore) CreateUser(_ context.Context, email, name, slug, passwordHash
 		// Mirror the DB default — `plan text not null default 'free'`. Without
 		// this the plan-gating handler tests would see empty-string and skip
 		// every branch.
-		Plan:         "free",
-		CreatedAt:    time.Now(),
+		Plan:      "free",
+		CreatedAt: time.Now(),
 	}
 	m.nextID++
 	m.users[u.ID] = u
@@ -117,7 +117,7 @@ func (m *memStore) SlugExists(_ context.Context, slug string) (bool, error) {
 	return false, nil
 }
 
-func (m *memStore) UpdateProfile(_ context.Context, userID, name, slug, timezone string, onboardingStep int) (*store.User, error) {
+func (m *memStore) UpdateProfile(_ context.Context, userID, name, slug, timezone string, onboardingStep int, avatarURL *string) (*store.User, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	u, ok := m.users[userID]
@@ -136,6 +136,7 @@ func (m *memStore) UpdateProfile(_ context.Context, userID, name, slug, timezone
 	u.Slug = slug
 	u.Timezone = timezone
 	u.OnboardingStep = onboardingStep
+	u.AvatarURL = avatarURL
 	return u, nil
 }
 
@@ -394,7 +395,7 @@ func (m *memStore) ListBookingsForEventInRange(_ context.Context, eventTypeID st
 	return out, nil
 }
 
-func (m *memStore) CancelBooking(_ context.Context, id string) error {
+func (m *memStore) CancelBooking(_ context.Context, id, reason, cancelledBy string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	b, ok := m.bookings[id]
@@ -402,6 +403,8 @@ func (m *memStore) CancelBooking(_ context.Context, id string) error {
 		return store.ErrNotFound
 	}
 	b.Status = "cancelled"
+	b.CancellationReason = &reason
+	b.CancelledBy = &cancelledBy
 	return nil
 }
 
@@ -552,6 +555,9 @@ func TestRegisterHappyPath(t *testing.T) {
 	if c := cookieFromResponse(rec, refreshCookieName); c == nil {
 		t.Fatal("expected refresh cookie to be set")
 	}
+	if c := cookieFromResponse(rec, authSessionCookieName); c == nil {
+		t.Fatal("expected auth session marker cookie to be set")
+	}
 }
 
 func TestRegisterDuplicateEmail(t *testing.T) {
@@ -681,6 +687,9 @@ func TestRefreshHappyPath(t *testing.T) {
 	if newCookie := cookieFromResponse(rec, refreshCookieName); newCookie == nil {
 		t.Fatal("expected new refresh cookie")
 	}
+	if c := cookieFromResponse(rec, authSessionCookieName); c == nil {
+		t.Fatal("expected auth session marker cookie")
+	}
 }
 
 func TestRefreshRotatesToken(t *testing.T) {
@@ -732,6 +741,10 @@ func TestLogoutClearsCookie(t *testing.T) {
 	c := cookieFromResponse(rec, refreshCookieName)
 	if c == nil || c.MaxAge >= 0 {
 		t.Fatal("expected refresh cookie to be cleared (MaxAge < 0)")
+	}
+	marker := cookieFromResponse(rec, authSessionCookieName)
+	if marker == nil || marker.MaxAge >= 0 {
+		t.Fatal("expected auth session marker cookie to be cleared (MaxAge < 0)")
 	}
 }
 

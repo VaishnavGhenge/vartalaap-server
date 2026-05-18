@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"net/http"
+	"time"
 )
 
 const meetAlphabet = "abcdefghijkmnpqrstuvwxyz23456789"
@@ -12,7 +13,7 @@ type newMeetResponse struct {
 	MeetCode string `json:"meetCode"`
 }
 
-func NewMeetHandler(allowedOrigins []string, limiter *RateLimiter) http.HandlerFunc {
+func NewMeetHandler(allowedOrigins []string, limiter *RateLimiter, registrars ...func(room string, now time.Time)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !enforceAPIRequest(w, r, allowedOrigins, http.MethodPost, limiter) {
 			return
@@ -26,6 +27,9 @@ func NewMeetHandler(allowedOrigins []string, limiter *RateLimiter) http.HandlerF
 		if err != nil {
 			http.Error(w, "could not create meet", http.StatusInternalServerError)
 			return
+		}
+		if len(registrars) > 0 && registrars[0] != nil {
+			registrars[0](code, time.Now().UTC())
 		}
 
 		w.Header().Set("Content-Type", "application/json")

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"log"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/vaishnavghenge/vartalaap-server/internal/email"
 	"github.com/vaishnavghenge/vartalaap-server/internal/httpx"
 	_ "github.com/vaishnavghenge/vartalaap-server/internal/metrics"
+	"github.com/vaishnavghenge/vartalaap-server/internal/roomaccess"
 	"github.com/vaishnavghenge/vartalaap-server/internal/sfu"
 	"github.com/vaishnavghenge/vartalaap-server/internal/signaling"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
@@ -54,6 +56,10 @@ func main() {
 	}()
 
 	hub := signaling.NewHub()
+	instantRooms := roomaccess.NewInstantRegistry()
+	hub.SetRoomEmptyHandler(func(roomID string) {
+		instantRooms.MarkEmpty(roomID, time.Now().UTC())
+	})
 	cf := cfturn.New(cfg.CFTurnKeyID, cfg.CFTurnAPIToken)
 	sfuRegistry := sfu.NewRegistry()
 	meetLimiter := httpx.NewRateLimiter(12, 24)
@@ -69,9 +75,35 @@ func main() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(b)
 	})
-	mux.HandleFunc("/ws", signaling.NewHandler(hub, cfg.AllowedOrigins))
-	mux.HandleFunc("/meets/new", httpx.NewMeetHandler(cfg.AllowedOrigins, meetLimiter))
-	mux.HandleFunc("/ice-servers", httpx.NewIceHandler(cf, cfg.AllowedOrigins, iceLimiter))
+	var roomGate httpx.RoomAccessGate
+	callRoomGate := func(ctx context.Context, room string, activate bool) error {
+		if roomGate == nil {
+			if activate {
+				return instantRooms.ActivateOrAllow(room, time.Now().UTC(), cfg.InstantRoomEmptyGrace)
+			}
+			return instantRooms.AllowActive(room, time.Now().UTC(), cfg.InstantRoomEmptyGrace)
+		}
+		return roomGate(ctx, room, activate)
+	}
+	signalingGate := func(ctx context.Context, room string) error {
+		if err := callRoomGate(ctx, room, true); err != nil {
+			switch {
+			case errors.Is(err, roomaccess.ErrNotStarted):
+				return &signaling.RoomGateError{Code: "ROOM_NOT_STARTED", Message: "This meeting has not started yet."}
+			case errors.Is(err, roomaccess.ErrExpired):
+				return &signaling.RoomGateError{Code: "ROOM_EXPIRED", Message: "This meeting is no longer active."}
+			default:
+				return &signaling.RoomGateError{Code: "ROOM_UNAVAILABLE", Message: "This meeting is not available right now."}
+			}
+		}
+		return nil
+	}
+
+	mux.HandleFunc("/ws", signaling.NewHandler(hub, cfg.AllowedOrigins, signalingGate))
+	mux.HandleFunc("/meets/new", httpx.NewMeetHandler(cfg.AllowedOrigins, meetLimiter, func(room string, now time.Time) {
+		instantRooms.Create(room, now, cfg.InstantRoomTTL)
+	}))
+	mux.HandleFunc("/ice-servers", httpx.NewIceHandler(cf, cfg.AllowedOrigins, iceLimiter, callRoomGate))
 
 	if cfg.CFCallsAppID != "" && cfg.CFCallsAppToken != "" {
 		cfCalls := cfrealtime.New(cfg.CFCallsAppID, cfg.CFCallsAppToken)
@@ -81,7 +113,7 @@ func main() {
 			AccessTokenTTL: cfg.AccessTokenTTL,
 			SecureCookie:   cfg.SecureCookie,
 		}
-		httpx.SFUHandlers(mux, hub, sfuRegistry, cfCalls, authCfg)
+		httpx.SFUHandlers(mux, hub, sfuRegistry, cfCalls, authCfg, callRoomGate)
 		log.Println("SFU endpoints enabled")
 	} else {
 		log.Println("WARN: SFU endpoints disabled (missing CF_CALLS_APP_ID or CF_CALLS_APP_TOKEN)")
@@ -107,6 +139,28 @@ func main() {
 		bookingDeps := httpx.BookingDeps{
 			Mailer:       mailer,
 			PublicAppURL: cfg.PublicAppURL,
+			RoomWindow: httpx.BookingRoomWindow{
+				OpenBefore: cfg.BookingRoomOpenBefore,
+				CloseAfter: cfg.BookingRoomCloseAfter,
+			},
+		}
+		roomGate = func(ctx context.Context, room string, activate bool) error {
+			if b, err := st.GetBookingByMeetCode(ctx, room); err == nil {
+				access := httpx.BookingRoomAccessFor(*b, time.Now().UTC(), bookingDeps.RoomWindow)
+				if access.Status == "open" {
+					return nil
+				}
+				if access.Status == "too_early" {
+					return roomaccess.ErrNotStarted
+				}
+				return roomaccess.ErrExpired
+			} else if !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			if activate {
+				return instantRooms.ActivateOrAllow(room, time.Now().UTC(), cfg.InstantRoomEmptyGrace)
+			}
+			return instantRooms.AllowActive(room, time.Now().UTC(), cfg.InstantRoomEmptyGrace)
 		}
 
 		httpx.AuthHandlers(mux, st, authCfg)

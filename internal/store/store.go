@@ -22,7 +22,7 @@ type Storer interface {
 	GetUserByID(ctx context.Context, id string) (*User, error)
 	GetUserBySlug(ctx context.Context, slug string) (*User, error)
 	SlugExists(ctx context.Context, slug string) (bool, error)
-	UpdateProfile(ctx context.Context, userID, name, slug, timezone string, onboardingStep int) (*User, error)
+	UpdateProfile(ctx context.Context, userID, name, slug, timezone string, onboardingStep int, avatarURL *string) (*User, error)
 	CreateRefreshToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
 	GetRefreshToken(ctx context.Context, tokenHash string) (*RefreshToken, error)
 	DeleteRefreshToken(ctx context.Context, tokenHash string) error
@@ -44,7 +44,7 @@ type Storer interface {
 	GetBookingByMeetCode(ctx context.Context, meetCode string) (*Booking, error)
 	ListBookingsForHost(ctx context.Context, hostID string, fromUTC time.Time, limit int) ([]Booking, error)
 	ListBookingsForEventInRange(ctx context.Context, eventTypeID string, fromUTC, toUTC time.Time) ([]Booking, error)
-	CancelBooking(ctx context.Context, id string) error
+	CancelBooking(ctx context.Context, id, reason, cancelledBy string) error
 	CountBookingsInMonth(ctx context.Context, hostID string, year int, month time.Month) (int, error)
 
 	// Slot holds: short-lived reservations created when a guest taps a slot
@@ -73,20 +73,23 @@ type User struct {
 // slug a guest sees in the booking URL. Soft-deleted by flipping IsActive
 // rather than removing the row so existing bookings keep a foreign-key target.
 type EventType struct {
-	ID            string
-	HostID        string
-	Slug          string
-	Title         string
-	DurationMin   int
-	BufferMin     int
-	MaxPerDay     *int    // nil = unlimited
-	IsPaid        bool
-	PriceCents    *int    // nil iff IsPaid=false
-	Currency      string
-	PaymentTiming string  // "upfront" | "after"
-	IsActive      bool
-	Description   *string
-	CreatedAt     time.Time
+	ID              string
+	HostID          string
+	Slug            string
+	Title           string
+	DurationMin     int
+	BufferMin       int  // buffer after the meeting ends
+	BufferBeforeMin int  // buffer before the meeting starts
+	MaxPerDay       *int // nil = unlimited
+	MinNoticeHours  int  // 0 = no minimum; guests cannot book within this many hours
+	MaxDaysAhead    int  // 0 = no limit; guests cannot book beyond this many days out
+	IsPaid          bool
+	PriceCents      *int // nil iff IsPaid=false
+	Currency        string
+	PaymentTiming   string // "upfront" | "after"
+	IsActive        bool
+	Description     *string
+	CreatedAt       time.Time
 }
 
 // Booking is one scheduled session between a host and a guest. Guests are
@@ -94,16 +97,18 @@ type EventType struct {
 // guests to sign up before booking. Status transitions are linear:
 // pending_payment → confirmed → completed | cancelled.
 type Booking struct {
-	ID              string
-	EventTypeID     string
-	HostID          string
-	GuestEmail      string
-	GuestName       string
-	StartsAt        time.Time
-	EndsAt          time.Time
-	MeetCode        string
-	Status          string  // "pending_payment" | "confirmed" | "cancelled" | "completed"
-	StripeSessionID *string
+	ID                 string
+	EventTypeID        string
+	HostID             string
+	GuestEmail         string
+	GuestName          string
+	StartsAt           time.Time
+	EndsAt             time.Time
+	MeetCode           string
+	Status             string // "pending_payment" | "confirmed" | "cancelled" | "completed"
+	StripeSessionID    *string
+	CancellationReason *string
+	CancelledBy        *string
 	// CancelToken authorises DELETE /m/{code}. The handler compares the
 	// caller's `?t=` query param against this value with constant-time
 	// equality. Distinct from MeetCode so leaking the join URL doesn't
@@ -223,13 +228,13 @@ func (s *Store) GetUserByID(ctx context.Context, id string) (*User, error) {
 	return u, nil
 }
 
-func (s *Store) UpdateProfile(ctx context.Context, userID, name, slug, timezone string, onboardingStep int) (*User, error) {
+func (s *Store) UpdateProfile(ctx context.Context, userID, name, slug, timezone string, onboardingStep int, avatarURL *string) (*User, error) {
 	u := &User{}
 	err := scanUser(s.pool.QueryRow(ctx,
-		`UPDATE users SET name=$2, slug=$3, timezone=$4, onboarding_step=$5
+		`UPDATE users SET name=$2, slug=$3, timezone=$4, onboarding_step=$5, avatar_url=$6
 		 WHERE id=$1
 		 RETURNING `+userCols,
-		userID, name, slug, timezone, onboardingStep,
+		userID, name, slug, timezone, onboardingStep, avatarURL,
 	), u)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -381,13 +386,16 @@ func (s *Store) ReplaceAvailability(ctx context.Context, hostID string, rules []
 
 // ─── Event types ─────────────────────────────────────────────────────────────
 
-const eventTypeCols = `id, host_id, slug, title, duration_min, buffer_min, max_per_day,
+const eventTypeCols = `id, host_id, slug, title,
+		duration_min, buffer_min, buffer_before_min, max_per_day,
+		min_notice_hours, max_days_ahead,
 		is_paid, price_cents, currency, payment_timing, is_active, description, created_at`
 
 func scanEventType(row pgx.Row, e *EventType) error {
 	return row.Scan(
 		&e.ID, &e.HostID, &e.Slug, &e.Title,
-		&e.DurationMin, &e.BufferMin, &e.MaxPerDay,
+		&e.DurationMin, &e.BufferMin, &e.BufferBeforeMin, &e.MaxPerDay,
+		&e.MinNoticeHours, &e.MaxDaysAhead,
 		&e.IsPaid, &e.PriceCents, &e.Currency, &e.PaymentTiming,
 		&e.IsActive, &e.Description, &e.CreatedAt,
 	)
@@ -465,11 +473,13 @@ func (s *Store) CreateEventType(ctx context.Context, e EventType) (*EventType, e
 	out := &EventType{}
 	err := scanEventType(s.pool.QueryRow(ctx,
 		`INSERT INTO event_types
-		   (host_id, slug, title, duration_min, buffer_min, max_per_day,
+		   (host_id, slug, title, duration_min, buffer_min, buffer_before_min, max_per_day,
+		    min_notice_hours, max_days_ahead,
 		    is_paid, price_cents, currency, payment_timing, is_active, description)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		 RETURNING `+eventTypeCols,
-		e.HostID, e.Slug, e.Title, e.DurationMin, e.BufferMin, e.MaxPerDay,
+		e.HostID, e.Slug, e.Title, e.DurationMin, e.BufferMin, e.BufferBeforeMin, e.MaxPerDay,
+		e.MinNoticeHours, e.MaxDaysAhead,
 		e.IsPaid, e.PriceCents, e.Currency, e.PaymentTiming, e.IsActive, e.Description,
 	), out)
 	if err != nil {
@@ -487,12 +497,14 @@ func (s *Store) UpdateEventType(ctx context.Context, e EventType) (*EventType, e
 	out := &EventType{}
 	err := scanEventType(s.pool.QueryRow(ctx,
 		`UPDATE event_types
-		    SET slug=$3, title=$4, duration_min=$5, buffer_min=$6, max_per_day=$7,
-		        is_paid=$8, price_cents=$9, currency=$10, payment_timing=$11,
-		        is_active=$12, description=$13
+		    SET slug=$3, title=$4, duration_min=$5, buffer_min=$6, buffer_before_min=$7,
+		        max_per_day=$8, min_notice_hours=$9, max_days_ahead=$10,
+		        is_paid=$11, price_cents=$12, currency=$13, payment_timing=$14,
+		        is_active=$15, description=$16
 		  WHERE id=$1 AND host_id=$2
 		  RETURNING `+eventTypeCols,
-		e.ID, e.HostID, e.Slug, e.Title, e.DurationMin, e.BufferMin, e.MaxPerDay,
+		e.ID, e.HostID, e.Slug, e.Title, e.DurationMin, e.BufferMin, e.BufferBeforeMin,
+		e.MaxPerDay, e.MinNoticeHours, e.MaxDaysAhead,
 		e.IsPaid, e.PriceCents, e.Currency, e.PaymentTiming, e.IsActive, e.Description,
 	), out)
 	if err != nil {
@@ -543,7 +555,7 @@ func (s *Store) CountActiveEventTypes(ctx context.Context, hostID string) (int, 
 
 const bookingCols = `id, event_type_id, host_id, guest_email, guest_name,
 		starts_at, ends_at, meet_code, status, stripe_session_id,
-		cancel_token, created_at`
+		cancel_token, cancellation_reason, cancelled_by, created_at`
 
 func scanBooking(row pgx.Row, b *Booking) error {
 	return row.Scan(
@@ -551,7 +563,7 @@ func scanBooking(row pgx.Row, b *Booking) error {
 		&b.GuestEmail, &b.GuestName,
 		&b.StartsAt, &b.EndsAt,
 		&b.MeetCode, &b.Status, &b.StripeSessionID,
-		&b.CancelToken, &b.CreatedAt,
+		&b.CancelToken, &b.CancellationReason, &b.CancelledBy, &b.CreatedAt,
 	)
 }
 
@@ -619,16 +631,15 @@ func (s *Store) GetBookingByMeetCode(ctx context.Context, meetCode string) (*Boo
 }
 
 // ListBookingsForHost returns the host's bookings starting at or after fromUTC,
-// ordered by starts_at ascending. Cancelled bookings are filtered out — they
-// muddy the dashboard "upcoming" view and the API doesn't currently surface
-// a "show cancelled" toggle.
+// ordered by starts_at ascending. Cancelled bookings remain visible so hosts
+// can see who cancelled and why from the dashboard.
 func (s *Store) ListBookingsForHost(ctx context.Context, hostID string, fromUTC time.Time, limit int) ([]Booking, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+bookingCols+` FROM bookings
-		 WHERE host_id = $1 AND status <> 'cancelled' AND starts_at >= $2
+		 WHERE host_id = $1 AND starts_at >= $2
 		 ORDER BY starts_at ASC
 		 LIMIT $3`,
 		hostID, fromUTC, limit,
@@ -691,11 +702,14 @@ func (s *Store) ListBookingsForEventInRange(ctx context.Context, eventTypeID str
 // CancelBooking marks a booking as cancelled. We keep the row so the audit
 // trail survives — a paid booking that gets refunded later still needs the
 // original record. ErrNotFound if the ID doesn't exist or is already cancelled.
-func (s *Store) CancelBooking(ctx context.Context, id string) error {
+func (s *Store) CancelBooking(ctx context.Context, id, reason, cancelledBy string) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE bookings SET status = 'cancelled'
+		`UPDATE bookings
+		    SET status = 'cancelled',
+		        cancellation_reason = $2,
+		        cancelled_by = $3
 		 WHERE id = $1 AND status <> 'cancelled'`,
-		id,
+		id, reason, cancelledBy,
 	)
 	if err != nil {
 		return fmt.Errorf("store: cancel booking: %w", err)

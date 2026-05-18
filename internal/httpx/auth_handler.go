@@ -17,9 +17,11 @@ import (
 )
 
 const (
-	refreshCookieName = "rt"
-	refreshCookiePath = "/auth"
-	refreshTokenTTL   = 30 * 24 * time.Hour
+	refreshCookieName     = "rt"
+	authSessionCookieName = "sessionly_session"
+	refreshCookiePath     = "/auth"
+	authSessionCookiePath = "/"
+	refreshTokenTTL       = 30 * 24 * time.Hour
 )
 
 var slugSep = regexp.MustCompile(`-{2,}`)
@@ -101,7 +103,7 @@ func handleRegister(st store.Storer, cfg AuthConfig) http.HandlerFunc {
 			Password string `json:"password"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid request", http.StatusBadRequest)
+			WriteError(w, http.StatusBadRequest, "INVALID_JSON", "invalid request")
 			return
 		}
 		body.Name = strings.TrimSpace(body.Name)
@@ -236,10 +238,11 @@ func handleUpdateMe(st store.Storer) http.HandlerFunc {
 		userID, _ := auth.UserIDFromContext(r.Context())
 
 		var body struct {
-			Name           string `json:"name"`
-			Slug           string `json:"slug"`
-			Timezone       string `json:"timezone"`
-			OnboardingStep int    `json:"onboardingStep"`
+			Name           string  `json:"name"`
+			Slug           string  `json:"slug"`
+			Timezone       string  `json:"timezone"`
+			OnboardingStep int     `json:"onboardingStep"`
+			AvatarURL      *string `json:"avatarUrl"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
@@ -248,33 +251,32 @@ func handleUpdateMe(st store.Storer) http.HandlerFunc {
 		body.Name = strings.TrimSpace(body.Name)
 		body.Slug = strings.TrimSpace(body.Slug)
 		if body.Name == "" {
-			http.Error(w, "name is required", http.StatusBadRequest)
+			WriteFieldError(w, http.StatusBadRequest, badField("name", "REQUIRED", "Name is required."))
 			return
 		}
 		if body.Slug != "" && !slugRe.MatchString(body.Slug) {
-			http.Error(w, "slug must be 3–30 lowercase letters, numbers, or hyphens", http.StatusBadRequest)
+			WriteFieldError(w, http.StatusBadRequest, badField("slug", "INVALID_SLUG", "Use 3-30 lowercase letters, numbers, or hyphens."))
 			return
 		}
 		if body.Timezone == "" {
 			body.Timezone = "UTC"
 		}
 
-		u, err := st.UpdateProfile(r.Context(), userID, body.Name, body.Slug, body.Timezone, body.OnboardingStep)
+		u, err := st.UpdateProfile(r.Context(), userID, body.Name, body.Slug, body.Timezone, body.OnboardingStep, body.AvatarURL)
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
-				http.Error(w, "slug already taken", http.StatusConflict)
+				WriteFieldError(w, http.StatusConflict, badField("slug", "SLUG_TAKEN", "This booking URL is already taken."))
 				return
 			}
 			if errors.Is(err, store.ErrNotFound) {
-				http.Error(w, "not found", http.StatusNotFound)
+				WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
 				return
 			}
 			slog.Error("auth: update profile", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "internal error")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(toUserResponse(u))
+		WriteJSON(w, http.StatusOK, toUserResponse(u))
 	}
 }
 
@@ -308,6 +310,14 @@ func writeTokens(w http.ResponseWriter, r *http.Request, st store.Storer, cfg Au
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(refreshTokenTTL.Seconds()),
 	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     authSessionCookieName,
+		Value:    "1",
+		Path:     authSessionCookiePath,
+		Secure:   cfg.SecureCookie,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(refreshTokenTTL.Seconds()),
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -320,6 +330,14 @@ func clearRefreshCookie(w http.ResponseWriter, secure bool) {
 		Value:    "",
 		Path:     refreshCookiePath,
 		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     authSessionCookieName,
+		Value:    "",
+		Path:     authSessionCookiePath,
 		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,

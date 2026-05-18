@@ -19,6 +19,13 @@ type Config struct {
 	JWTSecret       string
 	AccessTokenTTL  time.Duration
 	SecureCookie    bool
+	// BookingRoomOpenBefore is how early a booked room may be joined before
+	// its scheduled start. BookingRoomCloseAfter keeps links usable briefly
+	// after the scheduled end for calls that run over.
+	BookingRoomOpenBefore time.Duration
+	BookingRoomCloseAfter time.Duration
+	InstantRoomTTL        time.Duration
+	InstantRoomEmptyGrace time.Duration
 	// PublicAppURL is the canonical base URL the booking surface lives at —
 	// used to build absolute room/confirmation links in transactional emails.
 	// Falls back to the first AllowedOrigins entry so dev environments work
@@ -28,18 +35,22 @@ type Config struct {
 
 func Load() Config {
 	cfg := Config{
-		Port:            getenv("PORT", "8080"),
-		AllowedOrigins:  splitCSV(getenv("ALLOWED_ORIGINS", "http://localhost:3000")),
-		CFTurnKeyID:     os.Getenv("CF_TURN_KEY_ID"),
-		CFTurnAPIToken:  os.Getenv("CF_TURN_API_TOKEN"),
-		CFCallsAppID:    os.Getenv("CF_CALLS_APP_ID"),
-		CFCallsAppToken: os.Getenv("CF_CALLS_APP_TOKEN"),
-		SentryDSN:       os.Getenv("SENTRY_DSN"),
-		DatabaseURL:     os.Getenv("DATABASE_URL"),
-		JWTSecret:       os.Getenv("JWT_SECRET"),
-		AccessTokenTTL:  parseDuration(getenv("JWT_ACCESS_TTL", "15m")),
-		SecureCookie:    os.Getenv("SECURE_COOKIE") == "true",
-		PublicAppURL:    os.Getenv("PUBLIC_APP_URL"),
+		Port:                  getenv("PORT", "8080"),
+		AllowedOrigins:        splitCSV(getenv("ALLOWED_ORIGINS", "http://localhost:3000")),
+		CFTurnKeyID:           os.Getenv("CF_TURN_KEY_ID"),
+		CFTurnAPIToken:        os.Getenv("CF_TURN_API_TOKEN"),
+		CFCallsAppID:          os.Getenv("CF_CALLS_APP_ID"),
+		CFCallsAppToken:       os.Getenv("CF_CALLS_APP_TOKEN"),
+		SentryDSN:             os.Getenv("SENTRY_DSN"),
+		DatabaseURL:           os.Getenv("DATABASE_URL"),
+		JWTSecret:             os.Getenv("JWT_SECRET"),
+		AccessTokenTTL:        parseDuration(getenv("JWT_ACCESS_TTL", "15m")),
+		SecureCookie:          os.Getenv("SECURE_COOKIE") == "true",
+		BookingRoomOpenBefore: parseDuration(getenv("BOOKING_ROOM_OPEN_BEFORE", "10m")),
+		BookingRoomCloseAfter: parseDuration(getenv("BOOKING_ROOM_CLOSE_AFTER", "30m")),
+		InstantRoomTTL:        parseDuration(getenv("INSTANT_ROOM_TTL", "12h")),
+		InstantRoomEmptyGrace: parseDuration(getenv("INSTANT_ROOM_EMPTY_GRACE", "30m")),
+		PublicAppURL:          os.Getenv("PUBLIC_APP_URL"),
 	}
 	if cfg.PublicAppURL == "" && len(cfg.AllowedOrigins) > 0 {
 		cfg.PublicAppURL = cfg.AllowedOrigins[0]

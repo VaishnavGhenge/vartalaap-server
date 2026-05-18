@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/vaishnavghenge/vartalaap-server/internal/auth"
+	"github.com/vaishnavghenge/vartalaap-server/internal/plans"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
 
@@ -251,10 +252,6 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 
 // ─── Event types ─────────────────────────────────────────────────────────────
 
-// Per-plan limit on active event types. The free plan ships with one slot so a
-// new user can take a booking immediately; paid plans are unlimited.
-const freePlanEventTypeLimit = 1
-
 // Allowed durations come from the roadmap §Phase 2 schema. Keeping the set
 // fixed lets the UI build a duration picker that can never collide with the
 // DB CHECK constraint.
@@ -266,18 +263,21 @@ var allowedDurations = map[int]struct{}{
 // inputs.go::ValidateSlug — handled there so we have one slug regex.
 
 type eventTypeDTO struct {
-	ID            string  `json:"id,omitempty"`
-	Slug          string  `json:"slug"`
-	Title         string  `json:"title"`
-	DurationMin   int     `json:"durationMin"`
-	BufferMin     int     `json:"bufferMin"`
-	MaxPerDay     *int    `json:"maxPerDay,omitempty"`
-	IsPaid        bool    `json:"isPaid"`
-	PriceCents    *int    `json:"priceCents,omitempty"`
-	Currency      string  `json:"currency,omitempty"`
-	PaymentTiming string  `json:"paymentTiming,omitempty"`
-	IsActive      bool    `json:"isActive"`
-	Description   *string `json:"description,omitempty"`
+	ID              string  `json:"id,omitempty"`
+	Slug            string  `json:"slug"`
+	Title           string  `json:"title"`
+	DurationMin     int     `json:"durationMin"`
+	BufferMin       int     `json:"bufferMin"`
+	BufferBeforeMin int     `json:"bufferBeforeMin"`
+	MaxPerDay       *int    `json:"maxPerDay,omitempty"`
+	MinNoticeHours  int     `json:"minNoticeHours"`
+	MaxDaysAhead    int     `json:"maxDaysAhead"`
+	IsPaid          bool    `json:"isPaid"`
+	PriceCents      *int    `json:"priceCents,omitempty"`
+	Currency        string  `json:"currency,omitempty"`
+	PaymentTiming   string  `json:"paymentTiming,omitempty"`
+	IsActive        bool    `json:"isActive"`
+	Description     *string `json:"description,omitempty"`
 }
 
 type eventTypeListResponse struct {
@@ -287,7 +287,8 @@ type eventTypeListResponse struct {
 func toEventTypeDTO(e store.EventType) eventTypeDTO {
 	return eventTypeDTO{
 		ID: e.ID, Slug: e.Slug, Title: e.Title,
-		DurationMin: e.DurationMin, BufferMin: e.BufferMin, MaxPerDay: e.MaxPerDay,
+		DurationMin: e.DurationMin, BufferMin: e.BufferMin, BufferBeforeMin: e.BufferBeforeMin,
+		MaxPerDay: e.MaxPerDay, MinNoticeHours: e.MinNoticeHours, MaxDaysAhead: e.MaxDaysAhead,
 		IsPaid: e.IsPaid, PriceCents: e.PriceCents,
 		Currency: e.Currency, PaymentTiming: e.PaymentTiming,
 		IsActive: e.IsActive, Description: e.Description,
@@ -343,17 +344,18 @@ func handleCreateEventType(st store.Storer) http.HandlerFunc {
 			http.Error(w, msg, status)
 			return
 		}
-		// Active-count cap — only enforced on free. Paid plans are uncapped.
-		if user.Plan == "free" && ev.IsActive {
+		// Active event type cap. Limit defined in internal/plans — change it there.
+		lim := plans.For(user.Plan)
+		if ev.IsActive && lim.ActiveEventTypes != plans.Unlimited {
 			n, err := st.CountActiveEventTypes(r.Context(), userID)
 			if err != nil {
 				slog.Error("me/event-types: count", "err", err, "user_id", userID)
 				http.Error(w, "could not create event type", http.StatusInternalServerError)
 				return
 			}
-			if n >= freePlanEventTypeLimit {
+			if plans.Exceeds(lim.ActiveEventTypes, n) {
 				http.Error(w,
-					"free plan allows 1 active event type — upgrade to Solo for unlimited",
+					"your plan allows 1 active event type — upgrade to Solo for unlimited",
 					http.StatusForbidden)
 				return
 			}
@@ -361,7 +363,7 @@ func handleCreateEventType(st store.Storer) http.HandlerFunc {
 		created, err := st.CreateEventType(r.Context(), ev)
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
-				http.Error(w, "an event type with that slug already exists", http.StatusConflict)
+				WriteFieldError(w, http.StatusConflict, badField("slug", "EVENT_SLUG_TAKEN", "This event URL slug is already used."))
 				return
 			}
 			slog.Error("me/event-types: create", "err", err, "user_id", userID)
@@ -409,19 +411,20 @@ func handlePatchEventType(st store.Storer, id string) http.HandlerFunc {
 			return
 		}
 		ev.ID = id
-		// Re-enforce the free-plan active cap if this update is what flips
-		// the event from inactive to active. Otherwise an upgrade-then-downgrade
-		// trick could let a host activate more than one event on a free plan.
-		if user.Plan == "free" && ev.IsActive && !existing.IsActive {
+		// Re-enforce the active cap if this update flips the event from inactive
+		// to active — an upgrade-then-downgrade trick could otherwise let a host
+		// activate more events than their plan allows.
+		lim := plans.For(user.Plan)
+		if ev.IsActive && !existing.IsActive && lim.ActiveEventTypes != plans.Unlimited {
 			n, err := st.CountActiveEventTypes(r.Context(), userID)
 			if err != nil {
 				slog.Error("me/event-types: count", "err", err, "user_id", userID)
 				http.Error(w, "could not update event type", http.StatusInternalServerError)
 				return
 			}
-			if n >= freePlanEventTypeLimit {
+			if plans.Exceeds(lim.ActiveEventTypes, n) {
 				http.Error(w,
-					"free plan allows 1 active event type — upgrade to Solo for unlimited",
+					"your plan allows 1 active event type — upgrade to Solo for unlimited",
 					http.StatusForbidden)
 				return
 			}
@@ -433,7 +436,7 @@ func handlePatchEventType(st store.Storer, id string) http.HandlerFunc {
 				return
 			}
 			if errors.Is(err, store.ErrConflict) {
-				http.Error(w, "an event type with that slug already exists", http.StatusConflict)
+				WriteFieldError(w, http.StatusConflict, badField("slug", "EVENT_SLUG_TAKEN", "This event URL slug is already used."))
 				return
 			}
 			slog.Error("me/event-types: update", "err", err, "user_id", userID, "id", id)
@@ -485,14 +488,23 @@ func validateEventTypeDTO(dto eventTypeDTO, hostID, plan string) (store.EventTyp
 	if dto.BufferMin < 0 || dto.BufferMin > 120 {
 		return store.EventType{}, http.StatusBadRequest, "bufferMin must be 0–120"
 	}
+	if dto.BufferBeforeMin < 0 || dto.BufferBeforeMin > 120 {
+		return store.EventType{}, http.StatusBadRequest, "bufferBeforeMin must be 0–120"
+	}
 	if dto.MaxPerDay != nil && *dto.MaxPerDay <= 0 {
 		return store.EventType{}, http.StatusBadRequest, "maxPerDay must be a positive integer"
 	}
-	// Paid sessions are a Solo/Teams feature — free hosts cannot accept money
-	// directly through Sessionly. Enforced server-side so a tampered request
-	// can't bypass the UI gating.
+	if dto.MinNoticeHours < 0 || dto.MinNoticeHours > 336 {
+		return store.EventType{}, http.StatusBadRequest, "minNoticeHours must be 0–336"
+	}
+	if dto.MaxDaysAhead < 0 || dto.MaxDaysAhead > 365 {
+		return store.EventType{}, http.StatusBadRequest, "maxDaysAhead must be 0–365"
+	}
+	// Paid sessions require a plan that has PaidEvents=true. Enforced
+	// server-side so a tampered request can't bypass the UI gating. The
+	// flag is defined in internal/plans — flip it there when payments land.
 	if dto.IsPaid {
-		if plan == "free" {
+		if !plans.For(plan).PaidEvents {
 			return store.EventType{}, http.StatusForbidden,
 				"paid event types require the Solo or Teams plan"
 		}
@@ -533,17 +545,20 @@ func validateEventTypeDTO(dto eventTypeDTO, hostID, plan string) (store.EventTyp
 		}
 	}
 	return store.EventType{
-		HostID:        hostID,
-		Slug:          slug,
-		Title:         title,
-		DurationMin:   dto.DurationMin,
-		BufferMin:     dto.BufferMin,
-		MaxPerDay:     dto.MaxPerDay,
-		IsPaid:        dto.IsPaid,
-		PriceCents:    dto.PriceCents,
-		Currency:      currency,
-		PaymentTiming: paymentTiming,
-		IsActive:      dto.IsActive,
-		Description:   description,
+		HostID:          hostID,
+		Slug:            slug,
+		Title:           title,
+		DurationMin:     dto.DurationMin,
+		BufferMin:       dto.BufferMin,
+		BufferBeforeMin: dto.BufferBeforeMin,
+		MaxPerDay:       dto.MaxPerDay,
+		MinNoticeHours:  dto.MinNoticeHours,
+		MaxDaysAhead:    dto.MaxDaysAhead,
+		IsPaid:          dto.IsPaid,
+		PriceCents:      dto.PriceCents,
+		Currency:        currency,
+		PaymentTiming:   paymentTiming,
+		IsActive:        dto.IsActive,
+		Description:     description,
 	}, 0, ""
 }

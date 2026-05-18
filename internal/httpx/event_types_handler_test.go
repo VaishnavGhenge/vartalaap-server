@@ -140,8 +140,8 @@ func TestCreateEventType_FreePlanCapsAtOneActive(t *testing.T) {
 		t.Fatalf("second active event on free plan should 403, got %d: %s",
 			rec2.Code, rec2.Body.String())
 	}
-	if !strings.Contains(rec2.Body.String(), "free plan") {
-		t.Fatalf("expected free-plan message, got %q", rec2.Body.String())
+	if !strings.Contains(rec2.Body.String(), "plan allows") {
+		t.Fatalf("expected plan-cap message, got %q", rec2.Body.String())
 	}
 }
 
