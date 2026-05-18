@@ -10,12 +10,16 @@
 package email
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/mail"
 	"net/smtp"
 	"os"
@@ -83,9 +87,17 @@ func LoadConfig() (Config, bool) {
 	}, true
 }
 
-// NewFromEnv returns an SMTPMailer if SMTP_HOST is set, otherwise a
-// LogMailer. Either way the caller gets a working Mailer.
+// NewFromEnv returns the best available Mailer based on environment variables.
+// Priority: RESEND_API_KEY → SMTP_HOST → log-only.
 func NewFromEnv() Mailer {
+	if key := strings.TrimSpace(os.Getenv("RESEND_API_KEY")); key != "" {
+		from := strings.TrimSpace(os.Getenv("EMAIL_FROM"))
+		if from == "" {
+			from = "Sessionly <notifications@getsessionly.com>"
+		}
+		slog.Info("email: Resend HTTP mailer enabled", "from", from)
+		return &ResendMailer{apiKey: key, from: from, client: &http.Client{Timeout: 10 * time.Second}}
+	}
 	cfg, ok := LoadConfig()
 	if !ok {
 		slog.Info("email: SMTP_HOST not set, using log-only mailer")
@@ -93,6 +105,53 @@ func NewFromEnv() Mailer {
 	}
 	slog.Info("email: SMTP mailer enabled", "host", cfg.Host, "port", cfg.Port, "from", cfg.From)
 	return &SMTPMailer{cfg: cfg}
+}
+
+// ResendMailer sends via Resend's HTTP API (api.resend.com/emails).
+// Uses HTTPS port 443 — always open, unlike SMTP port 587 which DigitalOcean
+// blocks by default on new droplets.
+type ResendMailer struct {
+	apiKey string
+	from   string
+	client *http.Client
+}
+
+func (m *ResendMailer) Send(ctx context.Context, msg Message) error {
+	if len(msg.To) == 0 {
+		return errors.New("email: To is empty")
+	}
+	from := msg.From
+	if from == "" {
+		from = m.from
+	}
+	body := map[string]any{
+		"from":    from,
+		"to":      msg.To,
+		"subject": msg.Subject,
+		"text":    msg.TextBody,
+		"html":    msg.HTMLBody,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("resend: marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("resend: build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+m.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("resend: send: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("resend: status %d: %s", resp.StatusCode, b)
+	}
+	return nil
 }
 
 // LogMailer prints every message to slog at info level. Used in dev so the
