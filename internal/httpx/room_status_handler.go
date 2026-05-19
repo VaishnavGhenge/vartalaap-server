@@ -9,9 +9,10 @@ import (
 
 // RoomStatusResult is the response body for GET /room/status.
 type RoomStatusResult struct {
-	Status  string     `json:"status"`            // open | too_early | ended | cancelled | not_found
-	Message string     `json:"message,omitempty"`
-	OpensAt *time.Time `json:"opensAt,omitempty"` // set when status == too_early
+	Status   string     `json:"status"`             // open | too_early | ended | cancelled | not_found
+	Message  string     `json:"message,omitempty"`
+	OpensAt  *time.Time `json:"opensAt,omitempty"`  // set when status == too_early
+	ClosesAt *time.Time `json:"closesAt,omitempty"` // set when status == open so clients can show expiry warnings
 }
 
 // RoomStatusChecker is called by NewRoomStatusHandler to determine access.

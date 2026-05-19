@@ -12,6 +12,7 @@ import (
 
 type Claims struct {
 	UserID string `json:"uid"`
+	RoomID string `json:"rid,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -45,6 +46,24 @@ func VerifyAccessToken(tokenStr, secret string) (*Claims, error) {
 		return nil, fmt.Errorf("missing user id")
 	}
 	return claims, nil
+}
+
+// SignGuestToken creates a room-scoped JWT for unauthenticated call participants.
+// The SFU handler enforces the room scope.
+func SignGuestToken(guestID, roomID, secret string, ttl time.Duration) (string, error) {
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	claims := Claims{
+		UserID: guestID,
+		RoomID: roomID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
+	t := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return t.SignedString([]byte(secret))
 }
 
 // NewRefreshToken generates a cryptographically random opaque token.

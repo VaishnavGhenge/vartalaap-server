@@ -11,9 +11,10 @@ import (
 )
 
 type Hub struct {
-	mu          sync.Mutex
-	rooms       map[string]*Room
-	onRoomEmpty func(roomID string)
+	mu             sync.Mutex
+	rooms          map[string]*Room
+	onRoomEmpty    func(roomID string)
+	guestTokenFn   func(peerID, roomID string) (string, error)
 }
 
 func NewHub() *Hub {
@@ -168,4 +169,82 @@ func newPeerID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// SetGuestTokenFn registers the function used by knockAdmit to mint a
+// room-scoped guest JWT. Must be called before the hub starts serving
+// knock/knock-admit messages.
+func (h *Hub) SetGuestTokenFn(fn func(peerID, roomID string) (string, error)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.guestTokenFn = fn
+}
+
+// knock broadcasts a knock-request to all other peers in c's room.
+// If the room is empty (no one else is present), it sends a KNOCK_NO_HOST
+// error back to c instead.
+func (h *Hub) knock(c *Client) {
+	h.mu.Lock()
+	room := h.rooms[c.room]
+	h.mu.Unlock()
+
+	if room == nil {
+		c.sendErrorCode("NOT_IN_ROOM", "you must join a room before knocking")
+		return
+	}
+
+	peers := room.peerInfos()
+	hasOther := false
+	for _, p := range peers {
+		if p.ID != c.id {
+			hasOther = true
+			break
+		}
+	}
+	if !hasOther {
+		c.sendErrorCode("KNOCK_NO_HOST", "No one else is in the room yet.")
+		return
+	}
+
+	c.mu.RLock()
+	name := c.name
+	c.mu.RUnlock()
+
+	data, _ := json.Marshal(KnockRequestData{PeerID: c.id, Name: name})
+	payload, _ := json.Marshal(Envelope{Type: MsgKnockRequest, Room: c.room, From: c.id, Data: data})
+	room.broadcastExcept(c.id, payload)
+}
+
+// knockAdmit generates a guest JWT for targetPeerID and delivers it via a
+// knock-granted message. Only peers in the same room as `from` may admit.
+func (h *Hub) knockAdmit(from *Client, targetPeerID string) {
+	h.mu.Lock()
+	room := h.rooms[from.room]
+	tokenFn := h.guestTokenFn
+	h.mu.Unlock()
+
+	if room == nil {
+		from.sendError("not in a room")
+		return
+	}
+	if tokenFn == nil {
+		from.sendError("guest tokens not configured")
+		return
+	}
+
+	target := room.get(targetPeerID)
+	if target == nil {
+		from.sendError("peer not in room")
+		return
+	}
+
+	token, err := tokenFn(targetPeerID, from.room)
+	if err != nil {
+		from.sendError("could not issue token")
+		return
+	}
+
+	data, _ := json.Marshal(KnockGrantedData{SfuToken: token})
+	payload, _ := json.Marshal(Envelope{Type: MsgKnockGranted, Room: from.room, Data: data})
+	target.enqueue(payload)
 }

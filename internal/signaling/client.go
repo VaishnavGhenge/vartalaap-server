@@ -215,6 +215,18 @@ func (c *Client) handle(env *Envelope) {
 			}
 		}
 		c.observeClientMetric(m)
+	case MsgKnock:
+		c.hub.knock(c)
+	case MsgKnockAdmit:
+		var d KnockAdmitData
+		if len(env.Data) > 0 {
+			_ = json.Unmarshal(env.Data, &d)
+		}
+		if d.PeerID == "" {
+			c.sendError("peerId required for knock-admit")
+			return
+		}
+		c.hub.knockAdmit(c, d.PeerID)
 	default:
 		c.sendError("unknown message type: " + string(env.Type))
 	}

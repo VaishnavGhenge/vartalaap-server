@@ -40,6 +40,9 @@ type BookingInput struct {
 // time + meet link and close it.
 func RenderBookingConfirmation(in BookingInput, from string) Message {
 	roomURL := joinURL(in.PublicAppURL, "/room/"+in.MeetCode)
+	if in.CancelToken != "" {
+		roomURL += "?gt=" + in.CancelToken
+	}
 	confirmURL := joinURL(in.PublicAppURL, "/m/"+in.MeetCode)
 	if in.CancelToken != "" {
 		// The guest's link carries the cancel token so the same page can

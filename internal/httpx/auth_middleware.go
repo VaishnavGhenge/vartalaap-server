@@ -21,6 +21,8 @@ func RequireAuth(jwtSecret string, next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next(w, r.WithContext(auth.WithUserID(r.Context(), claims.UserID)))
+		ctx := auth.WithUserID(r.Context(), claims.UserID)
+		ctx = auth.WithRoomID(ctx, claims.RoomID)
+		next(w, r.WithContext(ctx))
 	}
 }

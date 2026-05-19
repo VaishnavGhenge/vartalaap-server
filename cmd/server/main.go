@@ -13,6 +13,7 @@ import (
 	"github.com/getsentry/sentry-go"
 	sentryhttp "github.com/getsentry/sentry-go/http"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/vaishnavghenge/vartalaap-server/internal/auth"
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfrealtime"
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfturn"
 	"github.com/vaishnavghenge/vartalaap-server/internal/config"
@@ -176,6 +177,10 @@ func main() {
 				t := access.OpensAt.UTC()
 				result.OpensAt = &t
 			}
+			if access.Status == "open" && !access.ClosesAt.IsZero() {
+				t := access.ClosesAt.UTC()
+				result.ClosesAt = &t
+			}
 			return result, true
 		}
 
@@ -197,6 +202,17 @@ func main() {
 			}
 			return instantRooms.AllowActive(room, time.Now().UTC(), cfg.InstantRoomEmptyGrace)
 		}
+
+		// Guest token function for the knock/admit flow (no booking required).
+		hub.SetGuestTokenFn(func(peerID, roomID string) (string, error) {
+			return auth.SignGuestToken("g:"+peerID, roomID, cfg.JWTSecret, 2*time.Hour)
+		})
+
+		mux.HandleFunc("/auth/guest", httpx.NewGuestTokenHandler(cfg.AllowedOrigins, httpx.GuestTokenDeps{
+			Store:      st,
+			JWTSecret:  cfg.JWTSecret,
+			RoomWindow: bookingDeps.RoomWindow,
+		}))
 
 		httpx.AuthHandlers(mux, st, authCfg)
 		httpx.MeHandlers(mux, st, authCfg)

@@ -59,6 +59,10 @@ func handleSFUCreateSession(registry *sfu.Registry, cf *cfrealtime.Client, gate 
 			http.Error(w, "roomId and peerId query params are required", http.StatusBadRequest)
 			return
 		}
+		if guestRoom := auth.RoomIDFromContext(r.Context()); guestRoom != "" && guestRoom != roomID {
+			WriteError(w, http.StatusForbidden, "ROOM_MISMATCH", "token is not valid for this room")
+			return
+		}
 		if gate != nil {
 			if err := gate(r.Context(), roomID, false); err != nil {
 				WriteError(w, http.StatusForbidden, roomAccessCode(err), roomAccessMessage(err))
@@ -108,6 +112,10 @@ func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrea
 		ownerID, roomID, peerID, ok := registry.Lookup(sessionID)
 		if !ok || ownerID != userID {
 			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		if guestRoom := auth.RoomIDFromContext(r.Context()); guestRoom != "" && guestRoom != roomID {
+			WriteError(w, http.StatusForbidden, "ROOM_MISMATCH", "token is not valid for this room")
 			return
 		}
 		if gate != nil {

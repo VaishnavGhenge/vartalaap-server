@@ -26,6 +26,20 @@ const (
 	// sole writer of the underlying Prom metrics; clients only emit observations.
 	// Sender: browser. Receiver: signaling client handler.
 	MsgClientMetric MsgType = "client-metric"
+
+	// MsgKnock is sent by a guest browser that holds no JWT and wants SFU access.
+	// Sender: guest browser. Receiver: server. Requests SFU access when no JWT is held.
+	MsgKnock MsgType = "knock"
+	// MsgKnockRequest is forwarded by the server to all other peers in the room
+	// so they can decide whether to admit the knocking guest.
+	// Sender: server. Receiver: all other peers in room. Payload: KnockRequestData.
+	MsgKnockRequest MsgType = "knock-request"
+	// MsgKnockAdmit is sent by any peer in the room to grant the knocking guest access.
+	// Sender: any peer in room. Receiver: server. Payload: KnockAdmitData.
+	MsgKnockAdmit MsgType = "knock-admit"
+	// MsgKnockGranted is sent by the server to the knocking guest after a peer admits them.
+	// Sender: server. Receiver: knocking guest only. Payload: KnockGrantedData.
+	MsgKnockGranted MsgType = "knock-granted"
 )
 
 type Envelope struct {
@@ -121,6 +135,19 @@ type ClientMetricData struct {
 	Value  float64 `json:"value"`
 	Phase  string  `json:"phase,omitempty"`
 	Result string  `json:"result,omitempty"`
+}
+
+type KnockRequestData struct {
+	PeerID string `json:"peerId"`
+	Name   string `json:"name"`
+}
+
+type KnockAdmitData struct {
+	PeerID string `json:"peerId"` // the knocking peer to admit
+}
+
+type KnockGrantedData struct {
+	SfuToken string `json:"sfuToken"`
 }
 
 type SfuTrackInfo struct {
