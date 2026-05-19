@@ -105,6 +105,26 @@ func main() {
 	}))
 	mux.HandleFunc("/ice-servers", httpx.NewIceHandler(cf, cfg.AllowedOrigins, iceLimiter, callRoomGate))
 
+	// getBookingStatus is nil until the DB block wires it in. The status handler
+	// reads it via closure so the booking-aware path activates without re-registration.
+	var getBookingStatus func(ctx context.Context, room string) (httpx.RoomStatusResult, bool)
+	mux.HandleFunc("/room/status", httpx.NewRoomStatusHandler(cfg.AllowedOrigins,
+		func(ctx context.Context, room string) httpx.RoomStatusResult {
+			if getBookingStatus != nil {
+				if result, ok := getBookingStatus(ctx, room); ok {
+					return result
+				}
+			}
+			// Instant-room fallback (or when DB is unavailable).
+			if err := instantRooms.AllowActive(room, time.Now().UTC(), cfg.InstantRoomEmptyGrace); err != nil {
+				if errors.Is(err, roomaccess.ErrExpired) {
+					return httpx.RoomStatusResult{Status: "ended", Message: "This room is no longer active."}
+				}
+				// ErrUnknownRoom: instant room hasn't been created yet; first join creates it.
+			}
+			return httpx.RoomStatusResult{Status: "open"}
+		}))
+
 	if cfg.CFCallsAppID != "" && cfg.CFCallsAppToken != "" {
 		cfCalls := cfrealtime.New(cfg.CFCallsAppID, cfg.CFCallsAppToken)
 		authCfg := httpx.AuthConfig{
@@ -144,6 +164,21 @@ func main() {
 				CloseAfter: cfg.BookingRoomCloseAfter,
 			},
 		}
+		getBookingStatus = func(ctx context.Context, room string) (httpx.RoomStatusResult, bool) {
+			b, err := st.GetBookingByMeetCode(ctx, room)
+			if err != nil {
+				// not a booking room — let instant-room path handle it
+				return httpx.RoomStatusResult{}, false
+			}
+			access := httpx.BookingRoomAccessFor(*b, time.Now().UTC(), bookingDeps.RoomWindow)
+			result := httpx.RoomStatusResult{Status: access.Status, Message: access.Message}
+			if access.Status == "too_early" && !access.OpensAt.IsZero() {
+				t := access.OpensAt.UTC()
+				result.OpensAt = &t
+			}
+			return result, true
+		}
+
 		roomGate = func(ctx context.Context, room string, activate bool) error {
 			if b, err := st.GetBookingByMeetCode(ctx, room); err == nil {
 				access := httpx.BookingRoomAccessFor(*b, time.Now().UTC(), bookingDeps.RoomWindow)
