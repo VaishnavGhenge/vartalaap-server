@@ -19,6 +19,23 @@ type Client struct {
 	baseURL  string
 }
 
+// HTTPError carries the raw response body from a Cloudflare Realtime 4xx/5xx.
+// Callers that proxy CF responses to the browser (e.g. the SFU tracks/new
+// handler) need this so they can forward CF's JSON error body verbatim —
+// partytracks parses errorCode/errorDescription from it and recovers
+// gracefully, but only if the body is valid JSON. Wrapping the error with
+// fmt.Errorf would lose the structured body.
+type HTTPError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Body       []byte
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("cfrealtime %s %s: %d %s", e.Method, e.Path, e.StatusCode, string(e.Body))
+}
+
 func New(appID, appToken string) *Client {
 	return &Client{
 		appID:    appID,
@@ -199,7 +216,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("cfrealtime %s %s: %d %s", method, path, resp.StatusCode, string(b))
+		return nil, &HTTPError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: b}
 	}
 	return b, nil
 }

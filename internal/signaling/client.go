@@ -37,6 +37,9 @@ type Client struct {
 	screenSharing bool
 	videoHeld     bool
 	presenceID    string
+	// needsAdmit is true when the peer joined without an SFU token and will
+	// knock. hub.join skips peer-joined broadcast until knockAdmit clears this.
+	needsAdmit bool
 }
 
 func (c *Client) info() PeerInfo {
@@ -140,6 +143,7 @@ func (c *Client) handle(env *Envelope) {
 		c.audio = jd.Audio
 		c.video = jd.Video
 		c.presenceID = jd.PresenceID
+		c.needsAdmit = jd.NeedsAdmit
 		c.mu.Unlock()
 		metrics.JoinsTotal.Inc()
 		slog.Info("ws_msg", "type", "join", "peer_id", c.id, "presence_id", jd.PresenceID, "room", env.Room, "name", jd.Name, "audio", jd.Audio, "video", jd.Video)

@@ -64,6 +64,10 @@ type JoinData struct {
 	Audio      bool   `json:"audio"`
 	Video      bool   `json:"video"`
 	PresenceID string `json:"presenceId,omitempty"`
+	// NeedsAdmit signals that this peer has no SFU token and will knock
+	// immediately after joining. The hub defers peer-joined until knockAdmit
+	// so the host never sees an un-admitted guest tile.
+	NeedsAdmit bool `json:"needsAdmit,omitempty"`
 }
 
 type JoinedData struct {

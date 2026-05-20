@@ -74,12 +74,19 @@ func (h *Hub) join(c *Client, roomID string) {
 		c.sendJSON(&Envelope{Type: MsgSfuTracks, Room: roomID, From: fromPeerID, Data: b})
 	}
 
-	info := c.info()
-	evt, _ := json.Marshal(PeerJoinedData{
-		PeerID: info.ID, Name: info.Name, Audio: info.Audio, Video: info.Video, ScreenSharing: info.ScreenSharing, VideoHeld: info.VideoHeld,
-	})
-	payload, _ := json.Marshal(Envelope{Type: MsgPeerJoined, Room: roomID, From: c.id, Data: evt})
-	room.broadcastExcept(c.id, payload)
+	// Knocking guests (NeedsAdmit=true) must not appear in the host's tile grid
+	// until the host explicitly admits them. Defer peer-joined until knockAdmit.
+	c.mu.RLock()
+	needsAdmit := c.needsAdmit
+	c.mu.RUnlock()
+	if !needsAdmit {
+		info := c.info()
+		evt, _ := json.Marshal(PeerJoinedData{
+			PeerID: info.ID, Name: info.Name, Audio: info.Audio, Video: info.Video, ScreenSharing: info.ScreenSharing, VideoHeld: info.VideoHeld,
+		})
+		payload, _ := json.Marshal(Envelope{Type: MsgPeerJoined, Room: roomID, From: c.id, Data: evt})
+		room.broadcastExcept(c.id, payload)
+	}
 }
 
 func (h *Hub) leaveAll(c *Client) {
@@ -247,4 +254,17 @@ func (h *Hub) knockAdmit(from *Client, targetPeerID string) {
 	data, _ := json.Marshal(KnockGrantedData{SfuToken: token})
 	payload, _ := json.Marshal(Envelope{Type: MsgKnockGranted, Room: from.room, Data: data})
 	target.enqueue(payload)
+
+	// Clear the deferred-join flag and announce the guest to all other peers now.
+	target.mu.Lock()
+	target.needsAdmit = false
+	target.mu.Unlock()
+
+	info := target.info()
+	peerJoinedEvt, _ := json.Marshal(PeerJoinedData{
+		PeerID: info.ID, Name: info.Name, Audio: info.Audio, Video: info.Video,
+		ScreenSharing: info.ScreenSharing, VideoHeld: info.VideoHeld,
+	})
+	peerJoinedPayload, _ := json.Marshal(Envelope{Type: MsgPeerJoined, Room: from.room, From: target.id, Data: peerJoinedEvt})
+	room.broadcastExcept(target.id, peerJoinedPayload)
 }

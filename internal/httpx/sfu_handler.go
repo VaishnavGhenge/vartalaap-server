@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -33,7 +34,7 @@ func SFUHandlers(mux *http.ServeMux, hub *signaling.Hub, registry *sfu.Registry,
 			if !enforceAPIRequestWithLimit(w, r, cfg.AllowedOrigins, method, lim, maxSFURequestBytes) {
 				return
 			}
-			RequireAuth(cfg.JWTSecret, h)(w, r)
+			RequireRoomMember(cfg.JWTSecret, h)(w, r)
 		}
 	}
 
@@ -152,7 +153,25 @@ func sfuTracksNew(hub *signaling.Hub, cf *cfrealtime.Client, sessionID, roomID, 
 
 		resp, err := cf.TracksNew(r.Context(), sessionID, req)
 		if err != nil {
-			slog.Error("sfu: tracks/new", "err", err, "session", sessionID)
+			// When CF returns a structured error (e.g. session_error with errorCode +
+			// errorDescription), forward the JSON body verbatim so partytracks on the
+			// browser side can read errorCode and decide whether to recreate the
+			// session. Wrapping in plain text via http.Error breaks partytracks's
+			// res.json() call with a JSON parse error.
+			var cfErr *cfrealtime.HTTPError
+			if errors.As(err, &cfErr) {
+				slog.Error("sfu: tracks/new",
+					"err", err, "session", sessionID,
+					"cf_status", cfErr.StatusCode, "cf_body", string(cfErr.Body))
+				if len(cfErr.Body) > 0 && json.Valid(cfErr.Body) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadGateway)
+					_, _ = w.Write(cfErr.Body)
+					return
+				}
+			} else {
+				slog.Error("sfu: tracks/new", "err", err, "session", sessionID)
+			}
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}

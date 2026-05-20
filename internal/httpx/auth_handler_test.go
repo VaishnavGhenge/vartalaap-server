@@ -817,6 +817,22 @@ func TestMeExpiredToken(t *testing.T) {
 	}
 }
 
+// Guest tokens are signed with the same secret but carry a RoomID claim.
+// Before the fix, they reached handleMe with claims.UserID = guestID and
+// GetUserByID(guestID) returned a 500 (or worse, a stale row). RequireAuth
+// must now reject them at the middleware boundary.
+func TestMeRejectsGuestToken(t *testing.T) {
+	tok, _ := auth.SignGuestToken("guest-abc", "room-1", testSecret, time.Minute)
+	h := RequireAuth(testSecret, handleMe(newMemStore()))
+	req := authReq(http.MethodGet, "/auth/me", "")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for guest token, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // --- slug generation ---
 
 func TestUniqueSlugSpecialChars(t *testing.T) {
