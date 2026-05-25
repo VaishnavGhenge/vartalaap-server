@@ -100,11 +100,21 @@ func (r *Room) empty() bool {
 	return len(r.members) == 0
 }
 
+// peerInfos returns info for all admitted members (needsAdmit=false).
+// Unadmitted guests are excluded so they never appear in another peer's
+// tile grid before the host lets them in, and so knock() can check
+// "is there anyone who can admit this guest?" without false positives.
 func (r *Room) peerInfos() []PeerInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	infos := make([]PeerInfo, 0, len(r.members))
 	for _, c := range r.members {
+		c.mu.RLock()
+		needsAdmit := c.needsAdmit
+		c.mu.RUnlock()
+		if needsAdmit {
+			continue
+		}
 		infos = append(infos, c.info())
 	}
 	return infos
