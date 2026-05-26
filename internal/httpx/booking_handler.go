@@ -389,9 +389,13 @@ func sendBookingEmails(ctx context.Context, deps BookingDeps, b *store.Booking, 
 	defer cancel()
 	if err := deps.Mailer.Send(sendCtx, email.RenderBookingConfirmation(in, "")); err != nil {
 		slog.Warn("bookings: guest email failed", "err", err, "booking_id", b.ID)
+	} else {
+		slog.Info("bookings: guest email sent", "booking_id", b.ID, "to", guestEmail)
 	}
 	if err := deps.Mailer.Send(sendCtx, email.RenderBookingNotification(in, "")); err != nil {
 		slog.Warn("bookings: host email failed", "err", err, "booking_id", b.ID)
+	} else {
+		slog.Info("bookings: host email sent", "booking_id", b.ID, "to", host.Email)
 	}
 }
 
