@@ -378,6 +378,131 @@ func TestSFUClose_OK(t *testing.T) {
 	}
 }
 
+// ─── Tests: guest room-scope enforcement ─────────────────────────────────────
+//
+// The security model: an invited (non-account) guest is issued a JWT that
+// carries a RoomID claim. RequireRoomMember puts that claim into the request
+// context, and every SFU handler MUST refuse the request when the guest's
+// RoomID disagrees with the roomId in the URL/query. Without this guard, a
+// guest with a valid token for room-A could create an SFU session in room-B,
+// or operate on a session belonging to a different room — bypassing the entire
+// room-membership model.
+//
+// The check lives at sfu_handler.go:63 and :118. Both call sites are exercised
+// here; deleting either guard fails one of these tests.
+
+func makeSFUGuestToken(guestID, roomID string) string {
+	tok, _ := auth.SignGuestToken(guestID, roomID, testSFUSecret, time.Minute)
+	return tok
+}
+
+// A guest holding a token for room-1 IS allowed to create an SFU session in
+// room-1 — establishes the positive case so the negative case below is a real
+// distinction rather than a global ban.
+func TestSFUCreateSession_GuestTokenForOwnRoomSucceeds(t *testing.T) {
+	cf := newFakeCFServer("cf-session-guest", cfrealtime.TracksNewResponse{})
+	defer cf.close()
+
+	hub := makeTestHub()
+	registry := makeTestRegistry()
+	mux := http.NewServeMux()
+	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+
+	token := makeSFUGuestToken("guest-alice", "room-1")
+	req := sfuRequest(http.MethodPost, "/sfu/sessions/new?roomId=room-1&peerId=peer-guest&kind=publish", nil, token)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The keystone test: a guest with a token for room-1 attempting to create an
+// SFU session in room-2 must be rejected with 403 ROOM_MISMATCH. If this test
+// fails, the room-membership boundary is broken — any guest invite link
+// becomes a key to every room.
+func TestSFUCreateSession_GuestTokenForWrongRoomReturns403(t *testing.T) {
+	cf := newFakeCFServer("cf-session-x", cfrealtime.TracksNewResponse{})
+	defer cf.close()
+
+	hub := makeTestHub()
+	registry := makeTestRegistry()
+	mux := http.NewServeMux()
+	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+
+	token := makeSFUGuestToken("guest-alice", "room-1")
+	// Same token, different roomId in the request — must be denied.
+	req := sfuRequest(http.MethodPost, "/sfu/sessions/new?roomId=room-2&peerId=peer-guest", nil, token)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 (room mismatch), got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "ROOM_MISMATCH") {
+		t.Errorf("expected error code ROOM_MISMATCH in body, got: %s", rec.Body.String())
+	}
+	// And no session must have been registered.
+	if _, _, _, ok := registry.Lookup("cf-session-x"); ok {
+		t.Error("session was registered despite room mismatch — guard failed")
+	}
+}
+
+// The /sfu/sessions/{id}/{...} routes have their own room-scope guard at
+// sfu_handler.go:118 (separate from the /new guard). A guest who somehow
+// obtained the session ID of a room-1 session must not be able to operate on
+// it with a room-2 token.
+func TestSFUSessionRoute_GuestTokenForWrongRoomReturns403(t *testing.T) {
+	cf := newFakeCFServer("sess-room1", cfrealtime.TracksNewResponse{})
+	defer cf.close()
+
+	hub := makeTestHub()
+	registry := makeTestRegistry()
+	// Session belongs to guest-alice in room-1.
+	registry.Register("sess-room1", "guest-alice", "room-1", "peer-alice")
+	mux := http.NewServeMux()
+	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+
+	// Attacker holds a valid guest token but for room-2, not room-1.
+	wrongToken := makeSFUGuestToken("guest-alice", "room-2")
+	body := cfrealtime.TracksNewRequest{Tracks: []cfrealtime.TrackObject{{TrackName: "audio"}}}
+	req := sfuRequest(http.MethodPost, "/sfu/sessions/sess-room1/tracks/new", body, wrongToken)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 on sub-route with wrong room scope, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "ROOM_MISMATCH") {
+		t.Errorf("expected ROOM_MISMATCH error code, got: %s", rec.Body.String())
+	}
+}
+
+// A regular (non-guest) user token has no RoomID claim, so the scope guard
+// must be a no-op for them — they're already gated by other handlers (room
+// access gate). Without this distinction, the SFU would be unreachable for
+// real users. This pins the "guestRoom != ''" half of the guard.
+func TestSFUCreateSession_RegularUserTokenHasNoRoomScopeRestriction(t *testing.T) {
+	cf := newFakeCFServer("cf-session-user", cfrealtime.TracksNewResponse{})
+	defer cf.close()
+
+	hub := makeTestHub()
+	registry := makeTestRegistry()
+	mux := http.NewServeMux()
+	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+
+	// Regular user — no RoomID claim. Should work for any room.
+	token := makeSFUAuthToken("user-1")
+	req := sfuRequest(http.MethodPost, "/sfu/sessions/new?roomId=any-room&peerId=peer-1", nil, token)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("regular user must not be subject to guest room-scope guard; got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSFUClose_NotFound(t *testing.T) {
 	cf := newFakeCFServer("sess-1", cfrealtime.TracksNewResponse{})
 	defer cf.close()

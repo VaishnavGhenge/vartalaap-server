@@ -2,7 +2,9 @@ package signaling
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
+	"time"
 )
 
 func testClient(id string) *Client {
@@ -220,4 +222,400 @@ func TestHubBroadcastSfuTracks_NoRoom(t *testing.T) {
 		SessionID: "sess",
 		Tracks:    []SfuTrackInfo{{TrackName: "audio"}},
 	})
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Knock / admit lifecycle — the bug class previously shipped as
+// "peer-joined-before-admit". A guest joining with NeedsAdmit=true must NOT
+// appear in other peers' tile grids until knockAdmit clears the flag. Each
+// test below pins one observable property of that lifecycle.
+// ──────────────────────────────────────────────────────────────────────────────
+
+// setTestClientStateAdmit configures a client with the needsAdmit flag set
+// (i.e., an un-admitted guest knocking for entry).
+func setTestClientStateAdmit(c *Client, name, presenceID string, needsAdmit bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.name = name
+	c.audio = true
+	c.video = true
+	c.presenceID = presenceID
+	c.needsAdmit = needsAdmit
+}
+
+// A knocking guest (needsAdmit=true) joining a room must NOT trigger a
+// peer-joined broadcast. If this regresses, host UIs show ghost tiles for
+// uninvited guests before the host has admitted them.
+func TestHubJoin_KnockingGuestDoesNotBroadcastPeerJoined(t *testing.T) {
+	hub := NewHub()
+	host := testClient("peer-host")
+	guest := testClient("peer-guest")
+	setTestClientStateAdmit(host, "Host", "p-host", false)
+	setTestClientStateAdmit(guest, "Guest", "p-guest", true) // knocking
+
+	hub.join(host, "room-1")
+	drainEnvelopes(t, host)
+
+	hub.join(guest, "room-1")
+
+	hostMessages := drainEnvelopes(t, host)
+	if _, ok := findEnvelope(hostMessages, MsgPeerJoined); ok {
+		t.Fatal("host received peer-joined for an un-admitted guest — admission lifecycle broken")
+	}
+}
+
+// peerInfos must exclude knocking guests so a third peer joining after the
+// guest doesn't see the guest in the "joined" peer list either. Tile grid
+// invariant: only admitted peers count.
+func TestHubJoin_NewJoinerDoesNotSeeKnockingGuestInPeerList(t *testing.T) {
+	hub := NewHub()
+	host := testClient("peer-host")
+	guest := testClient("peer-guest")
+	thirdJoiner := testClient("peer-third")
+	setTestClientStateAdmit(host, "Host", "p-host", false)
+	setTestClientStateAdmit(guest, "Guest", "p-guest", true)
+	setTestClientStateAdmit(thirdJoiner, "Third", "p-third", false)
+
+	hub.join(host, "room-1")
+	hub.join(guest, "room-1")
+	drainEnvelopes(t, host)
+	drainEnvelopes(t, guest)
+
+	hub.join(thirdJoiner, "room-1")
+	msgs := drainEnvelopes(t, thirdJoiner)
+	joined, ok := findEnvelope(msgs, MsgJoined)
+	if !ok {
+		t.Fatal("expected joined envelope")
+	}
+	var jd JoinedData
+	if err := json.Unmarshal(joined.Data, &jd); err != nil {
+		t.Fatalf("unmarshal joined: %v", err)
+	}
+	for _, p := range jd.Peers {
+		if p.ID == guest.id {
+			t.Fatal("knocking guest appeared in peer list before admission")
+		}
+	}
+}
+
+// knockAdmit must (1) deliver knock-granted with an SFU token to the target,
+// (2) clear the target's needsAdmit flag, and (3) broadcast peer-joined to
+// every other peer in the room. All three are part of one atomic action from
+// the host's perspective — splitting them caused the "SFU race after
+// setIsKnocking(false)" bug.
+func TestHubKnockAdmit_DeliversTokenAndAnnouncesPeer(t *testing.T) {
+	hub := NewHub()
+	hub.SetGuestTokenFn(func(peerID, roomID string) (string, error) {
+		return "guest-token-" + peerID + "-" + roomID, nil
+	})
+
+	host := testClient("peer-host")
+	guest := testClient("peer-guest")
+	bystander := testClient("peer-bystander")
+	setTestClientStateAdmit(host, "Host", "p-host", false)
+	setTestClientStateAdmit(guest, "Guest", "p-guest", true)
+	setTestClientStateAdmit(bystander, "Bystander", "p-by", false)
+
+	hub.join(host, "room-1")
+	hub.join(bystander, "room-1")
+	hub.join(guest, "room-1") // knocking, deferred
+	drainEnvelopes(t, host)
+	drainEnvelopes(t, bystander)
+	drainEnvelopes(t, guest)
+
+	hub.knockAdmit(host, guest.id)
+
+	// (1) Guest received knock-granted with the token.
+	guestMsgs := drainEnvelopes(t, guest)
+	granted, ok := findEnvelope(guestMsgs, MsgKnockGranted)
+	if !ok {
+		t.Fatal("guest did not receive knock-granted")
+	}
+	var gd KnockGrantedData
+	if err := json.Unmarshal(granted.Data, &gd); err != nil {
+		t.Fatalf("unmarshal knock-granted: %v", err)
+	}
+	if gd.SfuToken != "guest-token-peer-guest-room-1" {
+		t.Fatalf("expected SFU token to be issued for the admitted guest, got %q", gd.SfuToken)
+	}
+
+	// (2) The needsAdmit flag must be cleared, otherwise a subsequent joiner
+	// would still skip the guest in its peer list — the original bug.
+	guest.mu.RLock()
+	stillKnocking := guest.needsAdmit
+	guest.mu.RUnlock()
+	if stillKnocking {
+		t.Error("needsAdmit flag was not cleared after admission")
+	}
+
+	// (3) Bystander received peer-joined for the now-admitted guest.
+	bMsgs := drainEnvelopes(t, bystander)
+	announced, ok := findEnvelope(bMsgs, MsgPeerJoined)
+	if !ok {
+		t.Fatal("bystander did not receive peer-joined for the admitted guest")
+	}
+	var pd PeerJoinedData
+	if err := json.Unmarshal(announced.Data, &pd); err != nil {
+		t.Fatalf("unmarshal peer-joined: %v", err)
+	}
+	if pd.PeerID != guest.id {
+		t.Fatalf("expected peer-joined for %s, got %s", guest.id, pd.PeerID)
+	}
+}
+
+// A knocking guest in an otherwise empty room cannot self-admit. The hub must
+// respond with KNOCK_NO_HOST instead of silently dropping the knock — the UI
+// needs to surface "no one's here yet, try again".
+func TestHubKnock_EmptyRoomReturnsKnockNoHost(t *testing.T) {
+	hub := NewHub()
+	guest := testClient("peer-guest")
+	setTestClientStateAdmit(guest, "Guest", "p-guest", true)
+	hub.join(guest, "room-1")
+	drainEnvelopes(t, guest)
+
+	hub.knock(guest)
+
+	msgs := drainEnvelopes(t, guest)
+	errEnv, ok := findEnvelope(msgs, MsgError)
+	if !ok {
+		t.Fatal("expected error envelope when knocking with no other peer present")
+	}
+	var ed ErrorData
+	if err := json.Unmarshal(errEnv.Data, &ed); err != nil {
+		t.Fatalf("unmarshal error data: %v", err)
+	}
+	if ed.Code != "KNOCK_NO_HOST" {
+		t.Fatalf("expected code KNOCK_NO_HOST, got %q (msg=%q)", ed.Code, ed.Message)
+	}
+}
+
+// A client that has not joined any room cannot knock. Must respond with
+// NOT_IN_ROOM, not a crash and not silence.
+func TestHubKnock_NotInRoomReturnsNotInRoom(t *testing.T) {
+	hub := NewHub()
+	guest := testClient("peer-guest")
+	setTestClientStateAdmit(guest, "Guest", "p-guest", true)
+	// Intentionally NOT joining a room.
+
+	hub.knock(guest)
+
+	msgs := drainEnvelopes(t, guest)
+	errEnv, ok := findEnvelope(msgs, MsgError)
+	if !ok {
+		t.Fatal("expected error envelope for knock before join")
+	}
+	var ed ErrorData
+	_ = json.Unmarshal(errEnv.Data, &ed)
+	if ed.Code != "NOT_IN_ROOM" {
+		t.Fatalf("expected NOT_IN_ROOM, got code=%q msg=%q", ed.Code, ed.Message)
+	}
+}
+
+// If the host's knockAdmit names a peer that has since left, the target peer
+// cannot receive the token. The hub must surface an error to the admitter so
+// the UI can re-render, instead of silently dropping the admit.
+func TestHubKnockAdmit_PeerNotFoundSendsError(t *testing.T) {
+	hub := NewHub()
+	hub.SetGuestTokenFn(func(peerID, roomID string) (string, error) { return "tok", nil })
+	host := testClient("peer-host")
+	setTestClientStateAdmit(host, "Host", "p-host", false)
+	hub.join(host, "room-1")
+	drainEnvelopes(t, host)
+
+	hub.knockAdmit(host, "peer-ghost")
+
+	msgs := drainEnvelopes(t, host)
+	if _, ok := findEnvelope(msgs, MsgError); !ok {
+		t.Fatal("expected error envelope when admitting a non-existent peer")
+	}
+}
+
+// If guestTokenFn is not configured (a wiring error in cmd/server), knockAdmit
+// must NOT silently no-op — it must error so the misconfiguration is visible.
+func TestHubKnockAdmit_NoTokenFnSendsError(t *testing.T) {
+	hub := NewHub() // no SetGuestTokenFn
+	host := testClient("peer-host")
+	guest := testClient("peer-guest")
+	setTestClientStateAdmit(host, "Host", "p-host", false)
+	setTestClientStateAdmit(guest, "Guest", "p-guest", true)
+	hub.join(host, "room-1")
+	hub.join(guest, "room-1")
+	drainEnvelopes(t, host)
+
+	hub.knockAdmit(host, guest.id)
+
+	msgs := drainEnvelopes(t, host)
+	if _, ok := findEnvelope(msgs, MsgError); !ok {
+		t.Fatal("expected error envelope when guestTokenFn is not configured")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Late-joiner SFU track replay — the previously-shipped bug class where a peer
+// joining after another peer had already published tracks never received the
+// existing tracks, so its decoder stayed idle and the tile rendered black.
+// ──────────────────────────────────────────────────────────────────────────────
+
+// When a peer joins, the hub must replay every existing peer's currently
+// stored sfu-tracks so the late joiner can subscribe. Without this, a late
+// joiner has no way to learn about already-published tracks.
+func TestHubJoin_LateJoinerReceivesExistingSfuTracksReplay(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-pub")
+	lateJoiner := testClient("peer-late")
+	setTestClientStateAdmit(publisher, "Pub", "p-pub", false)
+	setTestClientStateAdmit(lateJoiner, "Late", "p-late", false)
+
+	hub.join(publisher, "room-1")
+	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
+		SessionID: "cf-sess-pub",
+		Tracks: []SfuTrackInfo{
+			{TrackName: "audio", Mid: "0"},
+			{TrackName: "video", Mid: "1"},
+		},
+	})
+	drainEnvelopes(t, publisher)
+
+	// Now the late joiner arrives — it must receive a sfu-tracks message
+	// carrying the publisher's existing tracks during its join sequence.
+	hub.join(lateJoiner, "room-1")
+	msgs := drainEnvelopes(t, lateJoiner)
+
+	tracks, ok := findEnvelope(msgs, MsgSfuTracks)
+	if !ok {
+		t.Fatal("late joiner did not receive sfu-tracks replay — would never subscribe to existing tracks")
+	}
+	if tracks.From != publisher.id {
+		t.Errorf("expected sfu-tracks from publisher, got %q", tracks.From)
+	}
+	var data SfuTracksData
+	if err := json.Unmarshal(tracks.Data, &data); err != nil {
+		t.Fatalf("unmarshal sfu-tracks: %v", err)
+	}
+	if data.SessionID != "cf-sess-pub" {
+		t.Errorf("expected sessionID cf-sess-pub, got %q", data.SessionID)
+	}
+	if len(data.Tracks) != 2 {
+		t.Errorf("expected 2 tracks replayed, got %d", len(data.Tracks))
+	}
+}
+
+// The room must MERGE sfu-tracks by trackName across multiple publishes. A peer
+// that publishes audio first, then publishes video later, must end up with BOTH
+// in the snapshot — otherwise the late-joiner replay only carries the latest
+// publish (the original bug shape: peer subscribes only to video, audio lost).
+func TestRoomStoreSfuTracks_MergesByTrackNameAcrossPublishes(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-pub")
+	setTestClientStateAdmit(publisher, "Pub", "p-pub", false)
+	hub.join(publisher, "room-1")
+
+	// First publish: audio only.
+	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
+		SessionID: "cf-sess-1",
+		Tracks:    []SfuTrackInfo{{TrackName: "audio", Mid: "0"}},
+	})
+	// Later publish: video added.
+	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
+		SessionID: "cf-sess-1",
+		Tracks:    []SfuTrackInfo{{TrackName: "video", Mid: "1"}},
+	})
+
+	room := hub.rooms["room-1"]
+	snap := room.sfuTrackSnapshot()
+	merged, ok := snap[publisher.id]
+	if !ok {
+		t.Fatal("publisher's tracks not stored")
+	}
+	if len(merged.Tracks) != 2 {
+		t.Fatalf("expected merged audio+video (2 tracks), got %d: %+v", len(merged.Tracks), merged.Tracks)
+	}
+	names := map[string]bool{}
+	for _, t := range merged.Tracks {
+		names[t.TrackName] = true
+	}
+	if !names["audio"] || !names["video"] {
+		t.Errorf("expected both audio and video after merge, got %v", names)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Room GC — when the last peer leaves, the room must be removed from the hub,
+// onRoomEmpty must fire, and sfu-tracks state must be released. A leak here
+// means orphaned rooms accumulate, which on the 1GB-RAM droplet becomes
+// observable as RSS growth.
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestHubLeaveAll_LastPeerTriggersRoomGCAndCallback(t *testing.T) {
+	hub := NewHub()
+
+	var (
+		emptyMu sync.Mutex
+		emptied []string
+	)
+	hub.SetRoomEmptyHandler(func(roomID string) {
+		emptyMu.Lock()
+		emptied = append(emptied, roomID)
+		emptyMu.Unlock()
+	})
+
+	c := testClient("peer-1")
+	setTestClientStateAdmit(c, "C", "p-1", false)
+	hub.join(c, "room-gc")
+
+	if _, ok := hub.rooms["room-gc"]; !ok {
+		t.Fatal("expected room to exist after join")
+	}
+
+	hub.leaveAll(c)
+
+	if _, ok := hub.rooms["room-gc"]; ok {
+		t.Error("room must be deleted from hub when the last peer leaves (memory leak risk)")
+	}
+
+	// Callback is fired in a goroutine; give it a moment.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		emptyMu.Lock()
+		got := len(emptied)
+		emptyMu.Unlock()
+		if got >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	emptyMu.Lock()
+	if len(emptied) != 1 || emptied[0] != "room-gc" {
+		t.Errorf("expected onRoomEmpty(\"room-gc\") to fire exactly once, got %v", emptied)
+	}
+	emptyMu.Unlock()
+}
+
+// A peer that disconnects without an explicit leave must still have its
+// sfu-tracks state cleaned up. Otherwise late joiners replay stale tracks for
+// a peer that is no longer present.
+func TestHubLeaveAll_ClearsSfuTracksEntry(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-pub")
+	observer := testClient("peer-obs")
+	setTestClientStateAdmit(publisher, "Pub", "p-pub", false)
+	setTestClientStateAdmit(observer, "Obs", "p-obs", false)
+
+	hub.join(publisher, "room-1")
+	hub.join(observer, "room-1") // keeps the room alive after publisher leaves
+	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
+		SessionID: "cf-sess-pub",
+		Tracks:    []SfuTrackInfo{{TrackName: "audio"}},
+	})
+
+	room := hub.rooms["room-1"]
+	if _, ok := room.sfuTrackSnapshot()[publisher.id]; !ok {
+		t.Fatal("precondition: publisher's tracks should be stored before leave")
+	}
+
+	hub.leaveAll(publisher)
+
+	if _, ok := room.sfuTrackSnapshot()[publisher.id]; ok {
+		t.Error("publisher's sfu-tracks must be cleaned up on leave to prevent stale-track replay")
+	}
 }

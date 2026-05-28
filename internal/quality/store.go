@@ -36,7 +36,14 @@ type Store struct {
 	reports map[string]PeerReport
 }
 
-var Default = &Store{reports: make(map[string]PeerReport)}
+var Default = NewStore()
+
+// NewStore returns an empty, ready-to-use Store. Used by callers that want
+// an isolated store rather than the package-level Default — most notably
+// tests, so the Default singleton doesn't leak state across them.
+func NewStore() *Store {
+	return &Store{reports: make(map[string]PeerReport)}
+}
 
 func (s *Store) Set(r PeerReport) {
 	r.UpdatedAt = time.Now()

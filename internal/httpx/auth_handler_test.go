@@ -352,6 +352,9 @@ func (m *memStore) GetBookingByMeetCode(_ context.Context, meetCode string) (*st
 	return nil, store.ErrNotFound
 }
 
+// Mirrors store.Store.ListBookingsForHost: cancelled bookings are NOT filtered
+// out — the host dashboard surfaces them on a "Cancelled" tab so hosts can see
+// who cancelled and why. See the SQL implementation in internal/store/store.go.
 func (m *memStore) ListBookingsForHost(_ context.Context, hostID string, fromUTC time.Time, limit int) ([]store.Booking, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -361,9 +364,6 @@ func (m *memStore) ListBookingsForHost(_ context.Context, hostID string, fromUTC
 	out := make([]store.Booking, 0)
 	for _, b := range m.bookings {
 		if b.HostID != hostID {
-			continue
-		}
-		if b.Status == "cancelled" {
 			continue
 		}
 		if b.StartsAt.Before(fromUTC) {

@@ -360,22 +360,42 @@ func TestListMyBookings_RequiresAuth(t *testing.T) {
 	}
 }
 
-func TestListMyBookings_FiltersPastAndCancelled(t *testing.T) {
+// TestListMyBookings_WindowAndCancellationVisibility pins the two product
+// decisions documented in booking_handler.go and store.go:
+//
+//  1. The /me/bookings window looks back 2h so in-progress sessions stay on
+//     the host dashboard alongside upcoming ones (commit 06617f5).
+//  2. Cancelled bookings remain visible to the host with status=cancelled so
+//     they can see who cancelled and why (store.ListBookingsForHost comment).
+//
+// Regressions in either rule are user-visible (sessions disappearing mid-call;
+// no audit trail on cancellations) so this test asserts both together.
+func TestListMyBookings_WindowAndCancellationVisibility(t *testing.T) {
 	st := newMemStore()
 	host, event, _, hostReq := bookingFixture(t, st, "host@example.com")
 	now := time.Now().UTC()
 
-	// One past booking — should NOT appear.
+	// Far-past booking — outside the 2h lookback window, must NOT appear.
 	if _, err := st.CreateBooking(context.Background(), store.Booking{
 		EventTypeID: event.ID, HostID: host.ID,
-		GuestEmail: "past@example.com", GuestName: "Past",
+		GuestEmail: "old@example.com", GuestName: "Old",
+		StartsAt: now.Add(-3 * time.Hour),
+		EndsAt:   now.Add(-2*time.Hour - 30*time.Minute),
+		MeetCode: "old-xxxxx-yyy", Status: "confirmed",
+	}); err != nil {
+		t.Fatalf("seed old: %v", err)
+	}
+	// In-progress booking — started 1h ago, still within the 2h window. MUST appear.
+	if _, err := st.CreateBooking(context.Background(), store.Booking{
+		EventTypeID: event.ID, HostID: host.ID,
+		GuestEmail: "live-now@example.com", GuestName: "Live Now",
 		StartsAt: now.Add(-1 * time.Hour),
 		EndsAt:   now.Add(-30 * time.Minute),
-		MeetCode: "past-xxxxx-yyy", Status: "confirmed",
+		MeetCode: "live-now-x-yyy", Status: "confirmed",
 	}); err != nil {
-		t.Fatalf("seed past: %v", err)
+		t.Fatalf("seed in-progress: %v", err)
 	}
-	// One cancelled future booking — should NOT appear.
+	// Cancelled future booking — host must still see it with status=cancelled.
 	cancelled, err := st.CreateBooking(context.Background(), store.Booking{
 		EventTypeID: event.ID, HostID: host.ID,
 		GuestEmail: "cxl@example.com", GuestName: "Cxl",
@@ -389,7 +409,7 @@ func TestListMyBookings_FiltersPastAndCancelled(t *testing.T) {
 	if err := st.CancelBooking(context.Background(), cancelled.ID, "No longer needed", "host"); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
-	// One live future booking — SHOULD appear.
+	// Live future booking — must appear.
 	if _, err := st.CreateBooking(context.Background(), store.Booking{
 		EventTypeID: event.ID, HostID: host.ID,
 		GuestEmail: "live@example.com", GuestName: "Live",
@@ -406,11 +426,34 @@ func TestListMyBookings_FiltersPastAndCancelled(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 	var resp bookingListResponse
-	json.NewDecoder(rec.Body).Decode(&resp)
-	if len(resp.Bookings) != 1 {
-		t.Fatalf("expected 1 booking, got %d: %+v", len(resp.Bookings), resp.Bookings)
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Bookings[0].GuestName != "Live" {
-		t.Fatalf("expected Live booking, got %+v", resp.Bookings[0])
+
+	byName := map[string]bookingDTO{}
+	for _, b := range resp.Bookings {
+		byName[b.GuestName] = b
+	}
+	if _, present := byName["Old"]; present {
+		t.Errorf("Old booking (-3h) should be filtered by the 2h lookback, got it back")
+	}
+	if _, present := byName["Live Now"]; !present {
+		t.Errorf("Live Now booking (-1h, still in progress) must be in the 2h window")
+	}
+	if _, present := byName["Live"]; !present {
+		t.Errorf("Live booking (+3h) must appear")
+	}
+	cxl, present := byName["Cxl"]
+	if !present {
+		t.Errorf("Cancelled booking must remain visible to the host (audit trail)")
+	} else if cxl.Status != "cancelled" {
+		t.Errorf("cancelled booking expected status=cancelled, got %q", cxl.Status)
+	}
+	if len(resp.Bookings) != 3 {
+		names := make([]string, 0, len(resp.Bookings))
+		for _, b := range resp.Bookings {
+			names = append(names, b.GuestName)
+		}
+		t.Errorf("expected 3 bookings (Live Now + Cxl + Live), got %d: %v", len(resp.Bookings), names)
 	}
 }
