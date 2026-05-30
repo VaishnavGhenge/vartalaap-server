@@ -131,6 +131,10 @@ type StatsReportData struct {
 //	call_setup_phase      value = seconds; phase ∈ {ice_gather, pub_connected,
 //	                      sub_connected, first_media}
 //	call_attempt          value ignored; result ∈ {success, timeout, error, abandoned}
+//	call_setup_failure    value ignored; reason ∈ {no_tracks_announced,
+//	                      tracks_announced_not_pulled, pull_errored,
+//	                      peers_present_none_publishing, unknown} — the
+//	                      errors-by-type breakdown of a setup timeout
 //
 // Unknown names are dropped with a debug log so a buggy client can't pollute
 // the histogram registry.
@@ -139,6 +143,7 @@ type ClientMetricData struct {
 	Value  float64 `json:"value"`
 	Phase  string  `json:"phase,omitempty"`
 	Result string  `json:"result,omitempty"`
+	Reason string  `json:"reason,omitempty"`
 }
 
 type KnockRequestData struct {

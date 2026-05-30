@@ -66,6 +66,16 @@ var (
 		Name: "vartalaap_call_attempts_total",
 		Help: "Call setup attempts by outcome (success, timeout, error, abandoned).",
 	}, []string{"result"})
+
+	// CallSetupFailures breaks a timeout (CallAttempts result=timeout) down by
+	// root cause — the errors-by-type golden signal. Lets us tell a server
+	// broadcast gap (no_tracks_announced) from a dead CF pull
+	// (tracks_announced_not_pulled) without reading client logs. The reason
+	// label is whitelisted in client.go to keep cardinality bounded.
+	CallSetupFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vartalaap_call_setup_failures_total",
+		Help: "Call setup timeouts by root cause (no_tracks_announced, tracks_announced_not_pulled, pull_errored, peers_present_none_publishing, unknown).",
+	}, []string{"reason"})
 )
 
 func init() {
@@ -80,5 +90,6 @@ func init() {
 		TimeToFirstMedia,
 		CallSetupPhase,
 		CallAttempts,
+		CallSetupFailures,
 	)
 }

@@ -280,6 +280,22 @@ func (c *Client) observeClientMetric(m ClientMetricData) {
 			"peer_id", c.id, "room", c.room,
 			"name", m.Name, "result", result,
 		)
+	case "call_setup_failure":
+		// Whitelist the reason label — same cardinality guard as phase/result.
+		// An unknown reason is dropped rather than counted, so a buggy client
+		// can't mint new label series. Keep in sync with CallFailureReason in
+		// the client protocol.ts.
+		reason := m.Reason
+		switch reason {
+		case "no_tracks_announced", "tracks_announced_not_pulled", "pull_errored", "peers_present_none_publishing", "unknown":
+			metrics.CallSetupFailures.WithLabelValues(reason).Inc()
+		default:
+			return
+		}
+		slog.Info("client_metric",
+			"peer_id", c.id, "room", c.room,
+			"name", m.Name, "reason", reason,
+		)
 	default:
 		// Unknown metric name. Logging at debug level avoids amplifying a buggy
 		// client into a log flood — at info level a misbehaving browser could

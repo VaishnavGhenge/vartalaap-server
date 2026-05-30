@@ -44,6 +44,10 @@ type Snapshot struct {
 	HTTP HistogramSummary `json:"http_seconds"`
 	// Call setup outcome counters + derived success rate.
 	CallAttempts CallAttemptsSummary `json:"call_attempts"`
+	// Errors-by-type breakdown of setup timeouts, keyed by reason. Empty until
+	// a timeout with a known reason is recorded. A reason here should sum toward
+	// CallAttempts.Timeout (both emitted once per failed call).
+	CallSetupFailures map[string]float64 `json:"call_setup_failures"`
 }
 
 func Gather() Snapshot {
@@ -92,19 +96,34 @@ func Gather() Snapshot {
 		attempts.SuccessRatePct = 100 * attempts.Success / total
 	}
 
+	// Pull every vartalaap_call_setup_failures_total:<reason> key into a
+	// reason→count map. Done by prefix scan rather than a fixed field list so a
+	// new reason added to the whitelist surfaces here without a snapshot change.
+	const failPrefix = "vartalaap_call_setup_failures_total:"
+	var failures map[string]float64
+	for key, v := range raw {
+		if reason, ok := strings.CutPrefix(key, failPrefix); ok {
+			if failures == nil {
+				failures = make(map[string]float64)
+			}
+			failures[reason] = v
+		}
+	}
+
 	return Snapshot{
-		ActivePeers:      raw["vartalaap_active_peers"],
-		ActiveRooms:      raw["vartalaap_active_rooms"],
-		JoinsTotal:       raw["vartalaap_joins_total"],
-		IceRequestsTotal: raw["vartalaap_ice_requests_total"],
-		IceErrorsTotal:   raw["vartalaap_ice_errors_total"],
-		SignalsOffer:     raw["vartalaap_signals_total:offer"],
-		SignalsAnswer:    raw["vartalaap_signals_total:answer"],
-		SignalsCandidate: raw["vartalaap_signals_total:candidate"],
-		Quality:          quality.Default.Aggregate(),
-		TTFM:             summarizeHistogram(ttfmHist),
-		HTTP:             summarizeHistogram(httpHist),
-		CallAttempts:     attempts,
+		ActivePeers:       raw["vartalaap_active_peers"],
+		ActiveRooms:       raw["vartalaap_active_rooms"],
+		JoinsTotal:        raw["vartalaap_joins_total"],
+		IceRequestsTotal:  raw["vartalaap_ice_requests_total"],
+		IceErrorsTotal:    raw["vartalaap_ice_errors_total"],
+		SignalsOffer:      raw["vartalaap_signals_total:offer"],
+		SignalsAnswer:     raw["vartalaap_signals_total:answer"],
+		SignalsCandidate:  raw["vartalaap_signals_total:candidate"],
+		Quality:           quality.Default.Aggregate(),
+		TTFM:              summarizeHistogram(ttfmHist),
+		HTTP:              summarizeHistogram(httpHist),
+		CallAttempts:      attempts,
+		CallSetupFailures: failures,
 	}
 }
 
@@ -140,8 +159,8 @@ func mergeHistograms(a, b *dto.Histogram) *dto.Histogram {
 	return merged
 }
 
-func ptrU64(v uint64) *uint64    { return &v }
-func ptrF64(v float64) *float64  { return &v }
+func ptrU64(v uint64) *uint64   { return &v }
+func ptrF64(v float64) *float64 { return &v }
 
 // summarizeHistogram derives p50/p95/p99 by linear interpolation across
 // cumulative bucket counts. This is the same method `histogram_quantile`

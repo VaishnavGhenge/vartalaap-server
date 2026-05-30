@@ -161,6 +161,27 @@ func TestObserveClientMetric_CallAttemptsRespectsResultWhitelist(t *testing.T) {
 	}
 }
 
+// call_setup_failure is a counter labeled by reason, the errors-by-type
+// breakdown of a setup timeout. The reason label is whitelisted just like
+// result/phase — an unknown reason must not be counted, to bound cardinality.
+func TestObserveClientMetric_CallSetupFailureRespectsReasonWhitelist(t *testing.T) {
+	c := newMetricClient()
+	known := metrics.CallSetupFailures.WithLabelValues("tracks_announced_not_pulled").(interface {
+		Write(*dto.Metric) error
+	})
+	before := counterValue(t, known)
+	c.observeClientMetric(ClientMetricData{Name: "call_setup_failure", Reason: "tracks_announced_not_pulled"})
+	if got := counterValue(t, known) - before; got != 1 {
+		t.Fatalf("expected reason counter to increment by 1, got %.0f", got)
+	}
+
+	bogusBefore := counterValue(t, known)
+	c.observeClientMetric(ClientMetricData{Name: "call_setup_failure", Reason: "made_up_reason"})
+	if got := counterValue(t, known) - bogusBefore; got != 0 {
+		t.Errorf("unknown reason must not increment any known-label counter; delta=%.0f", got)
+	}
+}
+
 // Unknown metric names are intentionally dropped (not observed anywhere), so
 // a client typo can't accidentally start a new permanent histogram series.
 // We verify this by asserting NO known histogram (TTFM) gains a sample.
