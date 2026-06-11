@@ -20,6 +20,16 @@ const (
 	// to the Cloudflare Realtime SFU. Receivers should subscribe to the announced tracks.
 	// Sender: HTTP SFU handler. Receiver: all other peers in the room.
 	MsgSfuTracks MsgType = "sfu-tracks"
+	// MsgSfuAnnounce carries the FULL set of tracks a peer currently publishes
+	// on its CF Realtime session. Unlike the tracks/new interception (which
+	// fires once, at publish time), this is level-triggered: the browser
+	// re-sends it after every signaling reconnect, restoring the room's stored
+	// track set that leaveAll/removeSfuTracks wiped while the peer was briefly
+	// gone. Without it, a WS blip permanently hides the peer's media from
+	// every later joiner. Replaces (not merges) the stored set, then is
+	// rebroadcast to the room as sfu-tracks.
+	// Sender: browser. Receiver: server. Payload: SfuTracksData.
+	MsgSfuAnnounce MsgType = "sfu-announce"
 	// MsgClientMetric carries a single observation from the browser into the
 	// server-side Prometheus histograms. Used for measurements only the client
 	// can take — time-to-first-media, ICE gather time, etc. The server is the

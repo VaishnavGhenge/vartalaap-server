@@ -43,6 +43,16 @@ func (r *Room) storeSfuTracks(peerID string, data SfuTracksData) SfuTracksData {
 	return result
 }
 
+// setSfuTracks replaces the peer's stored track set wholesale. Used by the
+// sfu-announce path, where the client sends its complete current set —
+// replace semantics drop track names left over from a previous CF session,
+// which the merge in storeSfuTracks would keep forever.
+func (r *Room) setSfuTracks(peerID string, data SfuTracksData) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sfuTracks[peerID] = data
+}
+
 func (r *Room) removeSfuTracks(peerID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

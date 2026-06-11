@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"sync"
 
 	"github.com/coder/websocket"
@@ -155,10 +156,41 @@ func (h *Hub) BroadcastSfuTracks(roomID, peerID string, data SfuTracksData) {
 	if room == nil {
 		return
 	}
+	// tracks/new is plain HTTP and can land while the peer's WebSocket is down
+	// (already removed from the room by leaveAll). Storing tracks for a
+	// non-member would create a zombie entry that gets replayed to every later
+	// joiner under a peerId nobody can attribute. The peer's own sfu-announce
+	// after reconnect restores the tracks under its new identity.
+	if room.get(peerID) == nil {
+		slog.Warn("sfu_tracks_dropped_non_member", "room", roomID, "peer_id", peerID, "session", data.SessionID)
+		return
+	}
 	merged := room.storeSfuTracks(peerID, data)
 	b, _ := json.Marshal(merged)
 	payload, _ := json.Marshal(Envelope{Type: MsgSfuTracks, Room: roomID, From: peerID, Data: b})
 	room.broadcastExcept(peerID, payload)
+}
+
+// AnnounceSfuTracks handles a client's sfu-announce: the authoritative full
+// set of tracks it currently publishes. The stored set is replaced (not
+// merged) and rebroadcast as sfu-tracks. This is the self-healing path — the
+// tracks/new interception fires only once per publish, so after a signaling
+// reconnect wipes the stored set, only the client can restore it.
+func (h *Hub) AnnounceSfuTracks(c *Client, data SfuTracksData) {
+	h.mu.Lock()
+	room := h.rooms[c.room]
+	h.mu.Unlock()
+	if room == nil {
+		c.sendErrorCode("NOT_IN_ROOM", "join a room before announcing tracks")
+		return
+	}
+	if room.get(c.id) == nil {
+		return
+	}
+	room.setSfuTracks(c.id, data)
+	b, _ := json.Marshal(data)
+	payload, _ := json.Marshal(Envelope{Type: MsgSfuTracks, Room: c.room, From: c.id, Data: b})
+	room.broadcastExcept(c.id, payload)
 }
 
 // Must be called with h.mu held.
