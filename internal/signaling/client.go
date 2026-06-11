@@ -18,6 +18,11 @@ import (
 const (
 	sendQueueTimeout = 2 * time.Second
 	readIdleTimeout  = 60 * time.Second
+
+	// sfu-announce bounds: a peer publishes at most audio + video + screen,
+	// and CF session/track identifiers are UUID-sized.
+	maxAnnouncedTracks = 8
+	maxSfuIDLen        = 256
 )
 
 var roomIDPattern = regexp.MustCompile(`^[a-z2-9]{3}-[a-z2-9]{4}-[a-z2-9]{3}$`)
@@ -219,6 +224,27 @@ func (c *Client) handle(env *Envelope) {
 			}
 		}
 		c.observeClientMetric(m)
+	case MsgSfuAnnounce:
+		var d SfuTracksData
+		if len(env.Data) > 0 {
+			_ = json.Unmarshal(env.Data, &d)
+		}
+		// Bound the payload: a peer publishes at most a handful of tracks
+		// (audio, video, screen). Reject junk instead of storing it — the
+		// stored set is replayed to every later joiner.
+		if d.SessionID == "" || len(d.SessionID) > maxSfuIDLen ||
+			len(d.Tracks) == 0 || len(d.Tracks) > maxAnnouncedTracks {
+			c.sendError("invalid sfu-announce")
+			return
+		}
+		for _, tr := range d.Tracks {
+			if tr.TrackName == "" || len(tr.TrackName) > maxSfuIDLen {
+				c.sendError("invalid sfu-announce")
+				return
+			}
+		}
+		slog.Info("ws_msg", "type", "sfu-announce", "peer_id", c.id, "room", c.room, "session", d.SessionID, "tracks", len(d.Tracks))
+		c.hub.AnnounceSfuTracks(c, d)
 	case MsgKnock:
 		c.hub.knock(c)
 	case MsgKnockAdmit:

@@ -224,6 +224,139 @@ func TestHubBroadcastSfuTracks_NoRoom(t *testing.T) {
 	})
 }
 
+// tracks/new is plain HTTP and can land while the publishing peer's WebSocket
+// is down (already removed from the room). Storing tracks for a non-member
+// would create a zombie entry replayed to every later joiner under a peerId
+// nobody can attribute.
+func TestHubBroadcastSfuTracks_DroppedForNonMember(t *testing.T) {
+	hub := NewHub()
+	member := testClient("peer-member")
+	setTestClientState(member, "Alice", "presence-alice")
+	hub.join(member, "room-1")
+	drainEnvelopes(t, member)
+
+	hub.BroadcastSfuTracks("room-1", "peer-gone", SfuTracksData{
+		SessionID: "cf-session-stale",
+		Tracks:    []SfuTrackInfo{{TrackName: "audio"}},
+	})
+
+	if msgs := drainEnvelopes(t, member); len(msgs) != 0 {
+		t.Fatalf("expected no broadcast for non-member publisher, got %d messages", len(msgs))
+	}
+
+	// A later joiner must not receive a replay for the non-member either.
+	late := testClient("peer-late")
+	setTestClientState(late, "Bob", "presence-bob")
+	hub.join(late, "room-1")
+	if env, ok := findEnvelope(drainEnvelopes(t, late), MsgSfuTracks); ok {
+		t.Fatalf("late joiner received zombie sfu-tracks replay from %s", env.From)
+	}
+}
+
+// sfu-announce is the self-healing path: after a signaling reconnect the
+// server's stored track set is gone and only the client can restore it. The
+// announce must be stored (for join replay) and rebroadcast (for peers that
+// tore down their subscriptions on peer-left).
+func TestHubAnnounceSfuTracks_StoresAndBroadcasts(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-publisher")
+	observer := testClient("peer-observer")
+	setTestClientState(publisher, "Alice", "presence-alice")
+	setTestClientState(observer, "Bob", "presence-bob")
+	hub.join(publisher, "room-1")
+	hub.join(observer, "room-1")
+	drainEnvelopes(t, publisher)
+	drainEnvelopes(t, observer)
+
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
+		SessionID: "cf-session-new",
+		Tracks:    []SfuTrackInfo{{TrackName: "track-a"}, {TrackName: "track-v"}},
+	})
+
+	env, ok := findEnvelope(drainEnvelopes(t, observer), MsgSfuTracks)
+	if !ok {
+		t.Fatal("observer should receive sfu-tracks after announce")
+	}
+	if env.From != publisher.id {
+		t.Fatalf("expected From=%s, got %s", publisher.id, env.From)
+	}
+
+	// Late joiner gets the announced set via the join replay.
+	late := testClient("peer-late")
+	setTestClientState(late, "Carol", "presence-carol")
+	hub.join(late, "room-1")
+	lateEnv, ok := findEnvelope(drainEnvelopes(t, late), MsgSfuTracks)
+	if !ok {
+		t.Fatal("late joiner should receive sfu-tracks replay after announce")
+	}
+	var data SfuTracksData
+	if err := json.Unmarshal(lateEnv.Data, &data); err != nil {
+		t.Fatalf("unmarshal replayed sfu-tracks: %v", err)
+	}
+	if data.SessionID != "cf-session-new" || len(data.Tracks) != 2 {
+		t.Fatalf("unexpected replayed announce: %+v", data)
+	}
+}
+
+// Announce replaces — it must drop track names left over from a previous CF
+// session, which the merge used by the tracks/new path would keep forever.
+func TestHubAnnounceSfuTracks_ReplacesStoredSet(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-publisher")
+	setTestClientState(publisher, "Alice", "presence-alice")
+	hub.join(publisher, "room-1")
+	drainEnvelopes(t, publisher)
+
+	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
+		SessionID: "cf-session-old",
+		Tracks:    []SfuTrackInfo{{TrackName: "stale-track"}},
+	})
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
+		SessionID: "cf-session-new",
+		Tracks:    []SfuTrackInfo{{TrackName: "fresh-track"}},
+	})
+
+	late := testClient("peer-late")
+	setTestClientState(late, "Bob", "presence-bob")
+	hub.join(late, "room-1")
+	env, ok := findEnvelope(drainEnvelopes(t, late), MsgSfuTracks)
+	if !ok {
+		t.Fatal("late joiner should receive sfu-tracks replay")
+	}
+	var data SfuTracksData
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("unmarshal replayed sfu-tracks: %v", err)
+	}
+	if data.SessionID != "cf-session-new" {
+		t.Fatalf("expected replaced sessionId cf-session-new, got %q", data.SessionID)
+	}
+	if len(data.Tracks) != 1 || data.Tracks[0].TrackName != "fresh-track" {
+		t.Fatalf("announce must replace, not merge — got tracks %+v", data.Tracks)
+	}
+}
+
+// An announce from a client that is not in any room must error, not panic or
+// store state.
+func TestHubAnnounceSfuTracks_NotInRoom(t *testing.T) {
+	hub := NewHub()
+	stray := testClient("peer-stray")
+	hub.AnnounceSfuTracks(stray, SfuTracksData{
+		SessionID: "sess",
+		Tracks:    []SfuTrackInfo{{TrackName: "audio"}},
+	})
+	env, ok := findEnvelope(drainEnvelopes(t, stray), MsgError)
+	if !ok {
+		t.Fatal("expected error envelope for announce outside a room")
+	}
+	var data ErrorData
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("unmarshal error data: %v", err)
+	}
+	if data.Code != "NOT_IN_ROOM" {
+		t.Fatalf("expected code NOT_IN_ROOM, got %q", data.Code)
+	}
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Knock / admit lifecycle — the bug class previously shipped as
 // "peer-joined-before-admit". A guest joining with NeedsAdmit=true must NOT
