@@ -11,6 +11,11 @@ fi
 DEPLOY_SERVER="${DEPLOY_SERVER:?DEPLOY_SERVER is required (e.g. root@1.2.3.4)}"
 DEPLOY_SSH_KEY="${DEPLOY_SSH_KEY:-$HOME/.ssh/id_rsa}"
 DEPLOY_DOMAIN="${DEPLOY_DOMAIN:?DEPLOY_DOMAIN is required (e.g. api.example.com)}"
+# Optional space-separated extra hostnames served by the same vhost/cert
+# (e.g. "api.getsessionly.com" during a domain migration). The cert lineage
+# stays under DEPLOY_DOMAIN — certbot --expand adds the alt names to it, so
+# the ssl_certificate paths in the nginx template remain valid.
+DEPLOY_ALT_DOMAINS="${DEPLOY_ALT_DOMAINS:-}"
 
 SSH="ssh -i $DEPLOY_SSH_KEY -o ServerAliveInterval=30 -o ConnectTimeout=15"
 BIN_NAME="vartalaap"
@@ -23,7 +28,8 @@ GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$LOCAL_BIN" ./cmd/server
 echo "==> Uploading artifacts..."
 # Substitute DEPLOY_DOMAIN into the nginx template before uploading
 NGINX_TMP=$(mktemp)
-DEPLOY_DOMAIN="$DEPLOY_DOMAIN" envsubst '$DEPLOY_DOMAIN' < deploy/nginx-api.conf > "$NGINX_TMP"
+DEPLOY_DOMAIN="$DEPLOY_DOMAIN" DEPLOY_ALT_DOMAINS="$DEPLOY_ALT_DOMAINS" \
+  envsubst '$DEPLOY_DOMAIN $DEPLOY_ALT_DOMAINS' < deploy/nginx-api.conf > "$NGINX_TMP"
 
 scp -i "$DEPLOY_SSH_KEY" -o ServerAliveInterval=30 -o ConnectTimeout=15 \
   "$LOCAL_BIN" deploy/vartalaap.service .env "$DEPLOY_SERVER:/tmp/"
@@ -32,7 +38,7 @@ scp -i "$DEPLOY_SSH_KEY" -o ServerAliveInterval=30 -o ConnectTimeout=15 \
 rm "$NGINX_TMP"
 
 echo "==> Installing and restarting service..."
-$SSH "$DEPLOY_SERVER" DEPLOY_DOMAIN="$DEPLOY_DOMAIN" bash <<'REMOTE'
+$SSH "$DEPLOY_SERVER" DEPLOY_DOMAIN="$DEPLOY_DOMAIN" DEPLOY_ALT_DOMAINS="$DEPLOY_ALT_DOMAINS" bash <<'REMOTE'
   set -euo pipefail
   if ! id -u vartalaap >/dev/null 2>&1; then
     useradd -r -s /bin/false vartalaap
@@ -50,7 +56,9 @@ $SSH "$DEPLOY_SERVER" DEPLOY_DOMAIN="$DEPLOY_DOMAIN" bash <<'REMOTE'
   systemctl daemon-reload
   systemctl enable vartalaap
   systemctl restart vartalaap
-  certbot --nginx -d "$DEPLOY_DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email || true
+  CERT_DOMAINS=(-d "$DEPLOY_DOMAIN")
+  for alt in $DEPLOY_ALT_DOMAINS; do CERT_DOMAINS+=(-d "$alt"); done
+  certbot --nginx "${CERT_DOMAINS[@]}" --expand --non-interactive --agree-tos --register-unsafely-without-email || true
   systemctl reload nginx
   sleep 2
   systemctl is-active vartalaap

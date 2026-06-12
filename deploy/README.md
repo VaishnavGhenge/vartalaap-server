@@ -28,7 +28,9 @@ ALLOWED_ORIGINS=https://vartalaap.vaishnavghenge.com
 ./deploy/deploy.sh
 ```
 
-That script builds the Linux binary, installs the systemd unit, installs the nginx vhost for `REDACTED_DOMAIN`, and runs Certbot to enable HTTPS.
+That script builds the Linux binary, installs the systemd unit, installs the nginx vhost for `$DEPLOY_DOMAIN`, and runs Certbot to enable HTTPS.
+
+Set `DEPLOY_ALT_DOMAINS` (space-separated) in `deploy/.env.deploy` to serve extra hostnames from the same vhost and certificate — used while migrating the API to `api.getsessionly.com` so the old domain keeps working until the frontend env flips. Cookies are `SameSite=Strict`, so the API host must share a registrable domain with the frontend (api.getsessionly.com ↔ getsessionly.com) for auth refresh to work.
 
 ## Verify on VM
 
