@@ -19,29 +19,34 @@ import (
 // memStore is an in-memory implementation of store.Storer for tests.
 type memStore struct {
 	mu            sync.Mutex
-	users         map[string]*store.User              // key: id
-	byEmail       map[string]string                   // email -> id
-	tokens        map[string]*store.RefreshToken      // key: tokenHash
-	avail         map[string][]store.AvailabilityRule // hostID -> rules
-	events        map[string]*store.EventType         // key: event id
-	bookings      map[string]*store.Booking           // key: booking id
-	holds         map[string]*store.SlotHold          // key: hold token
+	users         map[string]*store.User                 // key: id
+	byEmail       map[string]string                      // email -> id
+	tokens        map[string]*store.RefreshToken         // key: tokenHash
+	avail         map[string][]store.AvailabilityRule    // hostID -> rules
+	events        map[string]*store.EventType            // key: event id
+	bookings      map[string]*store.Booking              // key: booking id
+	holds         map[string]*store.SlotHold             // key: hold token
+	calConns      map[string]*store.CalendarConnection   // key: userID|provider
+	calEvents     map[string]*store.BookingCalendarEvent // key: bookingID|provider
 	nextID        int
 	nextAvailID   int
 	nextEventID   int
 	nextBookingID int
 	nextHoldID    int
+	nextCalID     int
 }
 
 func newMemStore() *memStore {
 	return &memStore{
-		users:    make(map[string]*store.User),
-		byEmail:  make(map[string]string),
-		tokens:   make(map[string]*store.RefreshToken),
-		avail:    make(map[string][]store.AvailabilityRule),
-		events:   make(map[string]*store.EventType),
-		bookings: make(map[string]*store.Booking),
-		holds:    make(map[string]*store.SlotHold),
+		users:     make(map[string]*store.User),
+		byEmail:   make(map[string]string),
+		tokens:    make(map[string]*store.RefreshToken),
+		avail:     make(map[string][]store.AvailabilityRule),
+		events:    make(map[string]*store.EventType),
+		bookings:  make(map[string]*store.Booking),
+		holds:     make(map[string]*store.SlotHold),
+		calConns:  make(map[string]*store.CalendarConnection),
+		calEvents: make(map[string]*store.BookingCalendarEvent),
 	}
 }
 
@@ -323,6 +328,13 @@ func (m *memStore) CreateBooking(_ context.Context, b store.Booking) (*store.Boo
 	m.nextBookingID++
 	b.ID = fmt.Sprintf("booking-%d", m.nextBookingID)
 	b.CreatedAt = time.Now()
+	// Mirror the SQL default: bookings(cancel_token) fills in a random value
+	// when the caller doesn't supply one. Without this the double diverges
+	// from production and the guest cancel link is untestable end to end,
+	// because handleGuestCancelBooking rejects an empty token.
+	if b.CancelToken == "" {
+		b.CancelToken = fmt.Sprintf("cancel-%s", b.ID)
+	}
 	clone := b
 	m.bookings[b.ID] = &clone
 	out := clone
@@ -481,6 +493,145 @@ func (m *memStore) ListActiveHoldsForHostInRange(_ context.Context, hostID strin
 		out = append(out, cp)
 	}
 	return out, nil
+}
+
+// --- calendar sync (Phase 3) ---
+
+func calKey(a, b string) string {
+	if b == "" {
+		b = "google"
+	}
+	return a + "|" + b
+}
+
+func (m *memStore) UpsertCalendarConnection(_ context.Context, c store.CalendarConnection) (*store.CalendarConnection, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c.Provider == "" {
+		c.Provider = "google"
+	}
+	if c.CalendarID == "" {
+		c.CalendarID = "primary"
+	}
+	stored := c
+	if existing, ok := m.calConns[calKey(c.UserID, c.Provider)]; ok {
+		stored.ID = existing.ID
+		stored.CreatedAt = existing.CreatedAt
+	} else {
+		m.nextCalID++
+		stored.ID = fmt.Sprintf("cal-%d", m.nextCalID)
+		stored.CreatedAt = time.Now().UTC()
+	}
+	// Reconnecting clears the revoked tombstone — mirrors the SQL upsert.
+	stored.RevokedAt = nil
+	stored.LastError = nil
+	stored.UpdatedAt = time.Now().UTC()
+	m.calConns[calKey(c.UserID, c.Provider)] = &stored
+	cp := stored
+	return &cp, nil
+}
+
+func (m *memStore) GetCalendarConnection(_ context.Context, userID, provider string) (*store.CalendarConnection, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.calConns[calKey(userID, provider)]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *c
+	return &cp, nil
+}
+
+func (m *memStore) findCalConnLocked(id string) *store.CalendarConnection {
+	for _, c := range m.calConns {
+		if c.ID == id {
+			return c
+		}
+	}
+	return nil
+}
+
+func (m *memStore) UpdateCalendarAccessToken(_ context.Context, id, encAccessToken string, expiresAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := m.findCalConnLocked(id)
+	if c == nil {
+		return store.ErrNotFound
+	}
+	c.AccessToken = encAccessToken
+	exp := expiresAt
+	c.ExpiresAt = &exp
+	c.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
+func (m *memStore) MarkCalendarRevoked(_ context.Context, id, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := m.findCalConnLocked(id)
+	if c == nil {
+		return store.ErrNotFound
+	}
+	if c.RevokedAt == nil {
+		now := time.Now().UTC()
+		c.RevokedAt = &now
+	}
+	r := reason
+	c.LastError = &r
+	return nil
+}
+
+func (m *memStore) RecordCalendarSync(_ context.Context, id string, syncErr *string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := m.findCalConnLocked(id)
+	if c == nil {
+		return store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	c.LastSyncedAt = &now
+	c.LastError = syncErr
+	return nil
+}
+
+func (m *memStore) DeleteCalendarConnection(_ context.Context, userID, provider string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.calConns, calKey(userID, provider))
+	return nil
+}
+
+func (m *memStore) CreateBookingCalendarEvent(_ context.Context, e store.BookingCalendarEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e.Provider == "" {
+		e.Provider = "google"
+	}
+	if e.CalendarID == "" {
+		e.CalendarID = "primary"
+	}
+	e.CreatedAt = time.Now().UTC()
+	stored := e
+	m.calEvents[calKey(e.BookingID, e.Provider)] = &stored
+	return nil
+}
+
+func (m *memStore) GetBookingCalendarEvent(_ context.Context, bookingID, provider string) (*store.BookingCalendarEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.calEvents[calKey(bookingID, provider)]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *e
+	return &cp, nil
+}
+
+func (m *memStore) DeleteBookingCalendarEvent(_ context.Context, bookingID, provider string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.calEvents, calKey(bookingID, provider))
+	return nil
 }
 
 // --- test helpers ---

@@ -79,7 +79,7 @@ func dispatchPublicWithDeps(st store.Storer, deps BookingDeps, w http.ResponseWr
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		handleListSlots(st, parts[0], parts[1])(w, r)
+		handleListSlots(st, deps, parts[0], parts[1])(w, r)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}

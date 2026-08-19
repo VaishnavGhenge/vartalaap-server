@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vaishnavghenge/vartalaap-server/internal/calendar"
+	"github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
 
@@ -56,7 +58,7 @@ func SlotHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, deps Book
 				http.Error(w, "not found", http.StatusNotFound)
 				return
 			}
-			route(w, r, cfg, lim, handleListSlots(st, hostSlug, parts[1]))
+			route(w, r, cfg, lim, handleListSlots(st, deps, hostSlug, parts[1]))
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
 		}
@@ -234,9 +236,16 @@ type slotsResponse struct {
 	HostName     string   `json:"hostName"`
 	HostTimezone string   `json:"hostTimezone"`
 	Slots        []string `json:"slots"` // RFC3339 in UTC; client formats per its own tz
+	// CalendarSyncDegraded is true when the host has a calendar connected but
+	// we could not read it for this request, so these slots may include times
+	// the host is already busy. Surfaced rather than hidden: a guest who books
+	// into a conflict deserves to have been warned, and silently serving
+	// possibly-wrong slots is the failure mode this whole feature exists to
+	// prevent.
+	CalendarSyncDegraded bool `json:"calendarSyncDegraded,omitempty"`
 }
 
-func handleListSlots(st store.Storer, hostSlug, eventSlug string) http.HandlerFunc {
+func handleListSlots(st store.Storer, deps BookingDeps, hostSlug, eventSlug string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		host, event, err := resolveBookingTarget(r.Context(), st, hostSlug, eventSlug)
 		if err != nil {
@@ -288,15 +297,33 @@ func handleListSlots(st store.Storer, hostSlug, eventSlug string) http.HandlerFu
 			return
 		}
 		blockers := mergeBookingsAndHolds(bookings, holds)
+
+		// External calendar busy periods. A failure here degrades rather than
+		// 500s: the booking page stays up without busy data, and the response
+		// says so. Losing every booking for a host because Google is down is
+		// worse than the double-booking risk this overlay removes, but the
+		// caller must know which of the two it is looking at.
+		degraded := false
+		if deps.Busy != nil {
+			busy, berr := deps.Busy.BusyPeriods(r.Context(), host.ID, fromUTC, toUTC)
+			if berr != nil {
+				slog.Warn("slots: calendar busy lookup failed", "err", berr, "host_id", host.ID)
+				metrics.CalendarBusyDegraded.Inc()
+				degraded = true
+			} else {
+				blockers = append(blockers, busyAsBookings(busy)...)
+			}
+		}
 		slots := generateSlots(rules, *event, blockers, fromUTC, toUTC, time.Now().UTC())
 
 		out := slotsResponse{
-			EventTypeID:  event.ID,
-			EventTitle:   event.Title,
-			DurationMin:  event.DurationMin,
-			HostName:     host.Name,
-			HostTimezone: host.Timezone,
-			Slots:        make([]string, 0, len(slots)),
+			EventTypeID:          event.ID,
+			EventTitle:           event.Title,
+			DurationMin:          event.DurationMin,
+			HostName:             host.Name,
+			HostTimezone:         host.Timezone,
+			Slots:                make([]string, 0, len(slots)),
+			CalendarSyncDegraded: degraded,
 		}
 		for _, t := range slots {
 			out.Slots = append(out.Slots, t.Format(time.RFC3339))
@@ -510,6 +537,23 @@ func mergeBookingsAndHolds(bookings []store.Booking, holds []store.SlotHold) []s
 			StartsAt:    h.StartsAt,
 			EndsAt:      h.EndsAt,
 			Status:      "held",
+		})
+	}
+	return out
+}
+
+// busyAsBookings converts external-calendar busy windows into booking-shaped
+// intervals so the same buffer + overlap predicate applies to them. The host's
+// event buffers are honoured around a Google meeting exactly as they are
+// around a Sessionly one, which is what a host means by "leave 15 minutes
+// after a meeting".
+func busyAsBookings(busy []calendar.Interval) []store.Booking {
+	out := make([]store.Booking, 0, len(busy))
+	for _, b := range busy {
+		out = append(out, store.Booking{
+			StartsAt: b.Start,
+			EndsAt:   b.End,
+			Status:   "external",
 		})
 	}
 	return out

@@ -54,6 +54,19 @@ type Storer interface {
 	GetSlotHoldByToken(ctx context.Context, token string) (*SlotHold, error)
 	DeleteSlotHold(ctx context.Context, token string) error
 	ListActiveHoldsForHostInRange(ctx context.Context, hostID string, fromUTC, toUTC time.Time) ([]SlotHold, error)
+
+	// Phase 3 — calendar sync. Token columns hold ciphertext; see
+	// internal/store/calendar.go and internal/secretbox.
+	UpsertCalendarConnection(ctx context.Context, c CalendarConnection) (*CalendarConnection, error)
+	GetCalendarConnection(ctx context.Context, userID, provider string) (*CalendarConnection, error)
+	UpdateCalendarAccessToken(ctx context.Context, id, encAccessToken string, expiresAt time.Time) error
+	MarkCalendarRevoked(ctx context.Context, id, reason string) error
+	RecordCalendarSync(ctx context.Context, id string, syncErr *string) error
+	DeleteCalendarConnection(ctx context.Context, userID, provider string) error
+
+	CreateBookingCalendarEvent(ctx context.Context, e BookingCalendarEvent) error
+	GetBookingCalendarEvent(ctx context.Context, bookingID, provider string) (*BookingCalendarEvent, error)
+	DeleteBookingCalendarEvent(ctx context.Context, bookingID, provider string) error
 }
 
 type User struct {
