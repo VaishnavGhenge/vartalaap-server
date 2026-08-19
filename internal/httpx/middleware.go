@@ -137,9 +137,16 @@ func statusClass(code int) string {
 func routeLabel(path string) string {
 	switch path {
 	case "/", "/healthz", "/metrics", "/stats", "/dashboard",
-		"/ws", "/meets/new", "/ice-servers",
+		"/ws", "/meets/new", "/ice-servers", "/room/status",
 		"/auth/register", "/auth/login", "/auth/refresh", "/auth/logout", "/auth/me",
-		"/me/availability", "/me/event-types", "/me/bookings", "/bookings", "/holds":
+		"/auth/guest",
+		"/me/availability", "/me/event-types", "/me/bookings", "/bookings", "/holds",
+		// Calendar routes are all static despite the /me/calendar/ prefix
+		// registration — the handler switches on a fixed action set, so an
+		// unrecognised action is a 404 and correctly falls through to "/other"
+		// rather than minting a label per garbage path.
+		"/me/calendar/status", "/me/calendar/connect/google",
+		"/me/calendar/callback/google", "/me/calendar/disconnect":
 		return path
 	}
 	// /me/event-types/{id} — normalise the ID out of the label.
