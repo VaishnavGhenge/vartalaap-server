@@ -145,7 +145,10 @@ func handleCalendarConnect(svc calendar.Connector) http.HandlerFunc {
 				"calendar sync is not configured on this server")
 			return
 		}
-		authURL, err := svc.AuthURL(userID)
+		// `return` names where the callback should land the browser. The
+		// service maps it through a closed allowlist, so an unknown or hostile
+		// value degrades to the dashboard rather than becoming an open redirect.
+		authURL, err := svc.AuthURL(userID, r.URL.Query().Get("return"))
 		if err != nil {
 			slog.Error("calendar: build auth url", "err", err, "user_id", userID)
 			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not start calendar connection")
@@ -171,23 +174,25 @@ func handleCalendarCallback(svc calendar.Connector) http.HandlerFunc {
 		q := r.URL.Query()
 		if gerr := q.Get("error"); gerr != "" {
 			// The host pressed Cancel on the consent screen, or Google refused.
+			// Google echoes `state` back even on denial, so the wizard still
+			// resumes where the host left it.
 			slog.Info("calendar: consent declined", "google_error", gerr)
-			redirectCalendar(w, r, svc.FailureRedirect(), "denied")
+			redirectCalendar(w, r, svc.RedirectTo(svc.ReturnPath(q.Get("state"))), "denied")
 			return
 		}
 		code := q.Get("code")
 		state := q.Get("state")
 		if code == "" || state == "" {
-			redirectCalendar(w, r, svc.FailureRedirect(), "invalid_callback")
+			redirectCalendar(w, r, svc.RedirectTo(""), "invalid_callback")
 			return
 		}
-		userID, err := svc.Complete(r.Context(), state, code)
+		userID, returnTo, err := svc.Complete(r.Context(), state, code)
 		if err != nil {
 			slog.Warn("calendar: oauth completion failed", "err", err, "user_id", userID)
-			redirectCalendar(w, r, svc.FailureRedirect(), "connect_failed")
+			redirectCalendar(w, r, svc.RedirectTo(returnTo), "connect_failed")
 			return
 		}
-		redirectCalendar(w, r, svc.SuccessRedirect(), "connected")
+		redirectCalendar(w, r, svc.RedirectTo(returnTo), "connected")
 	}
 }
 

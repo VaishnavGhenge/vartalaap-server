@@ -78,25 +78,36 @@ func (f *fakeSync) Cancelled() []string {
 
 // fakeConnector stands in for calendar.Service in the /me/calendar route tests.
 type fakeConnector struct {
-	authURL     string
-	authErr     error
-	completeErr error
-	completedAs string
-	disconnects int
-	status      calendar.Status
-	statusErr   error
+	authURL       string
+	authErr       error
+	completeErr   error
+	completedAs   string
+	completeTo    string
+	disconnects   int
+	status        calendar.Status
+	statusErr     error
+	lastReturnKey string
+	returnPath    string
 }
 
-func (f *fakeConnector) AuthURL(string) (string, error) { return f.authURL, f.authErr }
-func (f *fakeConnector) Complete(_ context.Context, _, _ string) (string, error) {
-	return f.completedAs, f.completeErr
+func (f *fakeConnector) AuthURL(_, returnKey string) (string, error) {
+	f.lastReturnKey = returnKey
+	return f.authURL, f.authErr
+}
+func (f *fakeConnector) Complete(_ context.Context, _, _ string) (string, string, error) {
+	return f.completedAs, f.completeTo, f.completeErr
 }
 func (f *fakeConnector) Disconnect(context.Context, string) error { f.disconnects++; return nil }
 func (f *fakeConnector) Status(context.Context, string) (calendar.Status, error) {
 	return f.status, f.statusErr
 }
-func (f *fakeConnector) SuccessRedirect() string { return "https://app.test/dashboard" }
-func (f *fakeConnector) FailureRedirect() string { return "https://app.test/dashboard" }
+func (f *fakeConnector) ReturnPath(string) string { return f.returnPath }
+func (f *fakeConnector) RedirectTo(path string) string {
+	if path == "" {
+		path = "/dashboard"
+	}
+	return "https://app.test" + path
+}
 
 // ─── Busy overlay in slot generation ─────────────────────────────────────────
 
@@ -493,5 +504,63 @@ func TestCalendarUnknownAction404s(t *testing.T) {
 	calendarMux(&fakeConnector{}).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("want 404, got %d", rec.Code)
+	}
+}
+
+// ─── OAuth return destination ────────────────────────────────────────────────
+
+// A host who connects during onboarding must resume the wizard. Without the
+// return key they land on the dashboard and silently skip the final step.
+func TestCalendarConnect_PassesReturnKeyThrough(t *testing.T) {
+	st := newMemStore()
+	registerUser(t, st, "ret@example.com", "password123")
+	u, _ := st.GetUserByEmail(context.Background(), "ret@example.com")
+
+	svc := &fakeConnector{authURL: "https://accounts.google.com/o/oauth2/v2/auth"}
+	req := authReq(http.MethodGet, "/me/calendar/connect/google?return=onboarding", "")
+	req.Header.Set("Authorization", "Bearer "+tokenForUser(t, u.ID))
+	calendarMux(svc).ServeHTTP(httptest.NewRecorder(), req)
+
+	if svc.lastReturnKey != "onboarding" {
+		t.Fatalf("return key = %q, want onboarding", svc.lastReturnKey)
+	}
+}
+
+func TestCalendarCallback_ReturnsToOnboarding(t *testing.T) {
+	svc := &fakeConnector{completedAs: "user-1", completeTo: "/onboarding"}
+	req := httptest.NewRequest(http.MethodGet, "/me/calendar/callback/google?code=c&state=s", nil)
+	rec := httptest.NewRecorder()
+	calendarMux(svc).ServeHTTP(rec, req)
+
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "/onboarding") || !strings.Contains(loc, "calendar=connected") {
+		t.Fatalf("location = %q, want the onboarding page with the outcome", loc)
+	}
+}
+
+// Google echoes state back on denial too, so a host who cancels should land
+// where they started rather than being teleported to the dashboard.
+func TestCalendarCallback_DenialReturnsToOrigin(t *testing.T) {
+	svc := &fakeConnector{returnPath: "/onboarding"}
+	req := httptest.NewRequest(http.MethodGet, "/me/calendar/callback/google?error=access_denied&state=s", nil)
+	rec := httptest.NewRecorder()
+	calendarMux(svc).ServeHTTP(rec, req)
+
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "/onboarding") || !strings.Contains(loc, "calendar=denied") {
+		t.Fatalf("location = %q, want onboarding with denied", loc)
+	}
+}
+
+// A completion failure still has to put the host somewhere real.
+func TestCalendarCallback_FailureKeepsReturnDestination(t *testing.T) {
+	svc := &fakeConnector{completeTo: "/onboarding", completeErr: errors.New("expired state")}
+	req := httptest.NewRequest(http.MethodGet, "/me/calendar/callback/google?code=c&state=s", nil)
+	rec := httptest.NewRecorder()
+	calendarMux(svc).ServeHTTP(rec, req)
+
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "/onboarding") || !strings.Contains(loc, "calendar=connect_failed") {
+		t.Fatalf("location = %q", loc)
 	}
 }

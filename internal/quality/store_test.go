@@ -91,7 +91,7 @@ func TestAggregate_EmptyStoreReturnsZeros(t *testing.T) {
 func TestAggregate_NegativeRTTValuesSkippedFromAverage(t *testing.T) {
 	s := newStore()
 	s.Set(newReport("good", "good", 100, 0))
-	s.Set(newReport("missing", "good", -1, 0))  // sentinel for "no data"
+	s.Set(newReport("missing", "good", -1, 0)) // sentinel for "no data"
 	s.Set(newReport("also-good", "good", 200, 0))
 
 	agg := s.Aggregate()
@@ -125,8 +125,8 @@ func TestAggregate_LossAveragedAcrossAllPeers(t *testing.T) {
 func TestAggregate_UnknownQualityValueNotBucketed(t *testing.T) {
 	s := newStore()
 	s.Set(newReport("p1", "good", 50, 0))
-	s.Set(newReport("p2", "", 50, 0))           // empty string
-	s.Set(newReport("p3", "excellent", 50, 0))  // hypothetical future value
+	s.Set(newReport("p2", "", 50, 0))          // empty string
+	s.Set(newReport("p3", "excellent", 50, 0)) // hypothetical future value
 
 	agg := s.Aggregate()
 	if agg.PeersGood != 1 || agg.PeersMedium != 0 || agg.PeersPoor != 0 {
@@ -180,7 +180,7 @@ func TestAggregate_VideoHeldCount(t *testing.T) {
 func TestSet_SamePeerIDOverwritesPriorReport(t *testing.T) {
 	s := newStore()
 	s.Set(newReport("p1", "good", 50, 0))
-	s.Set(newReport("p1", "poor", 800, 5))  // same peer, fresh report
+	s.Set(newReport("p1", "poor", 800, 5)) // same peer, fresh report
 
 	agg := s.Aggregate()
 	if agg.PeersGood != 0 {

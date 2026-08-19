@@ -103,19 +103,24 @@ func (f *fakeStore) DeleteBookingCalendarEvent(_ context.Context, _, _ string) e
 // stubSigner keeps state handling trivial and independent of JWT specifics.
 type stubSigner struct{ fail bool }
 
-func (s stubSigner) SignPurposeToken(userID, purpose, _ string, _ time.Duration) (string, error) {
-	return purpose + ":" + userID, nil
+// Encodes the return path into the fake state so the round-trip is observable.
+func (s stubSigner) SignPurposeToken(userID, purpose, returnTo, _ string, _ time.Duration) (string, error) {
+	return purpose + ":" + returnTo + ":" + userID, nil
 }
 
-func (s stubSigner) VerifyPurposeToken(tokenStr, purpose, _ string) (string, error) {
+func (s stubSigner) VerifyPurposeToken(tokenStr, purpose, _ string) (string, string, error) {
 	if s.fail {
-		return "", errors.New("bad state")
+		return "", "", errors.New("bad state")
 	}
 	rest, ok := strings.CutPrefix(tokenStr, purpose+":")
 	if !ok {
-		return "", errors.New("wrong purpose")
+		return "", "", errors.New("wrong purpose")
 	}
-	return rest, nil
+	parts := strings.SplitN(rest, ":", 2)
+	if len(parts) != 2 {
+		return "", "", errors.New("malformed stub state")
+	}
+	return parts[1], parts[0], nil
 }
 
 func newTestService(t *testing.T, st *fakeStore, h http.Handler) *Service {
@@ -127,13 +132,12 @@ func newTestService(t *testing.T, st *fakeStore, h http.Handler) *Service {
 		t.Fatalf("box: %v", err)
 	}
 	return NewService(Options{
-		Store:           st,
-		Client:          gcal.NewWithBase("cid", "secret", "https://api.test/cb", srv.URL),
-		Box:             box,
-		Signer:          stubSigner{},
-		JWTSecret:       "secret",
-		SuccessRedirect: "https://app.test/dashboard",
-		FailureRedirect: "https://app.test/dashboard",
+		Store:        st,
+		Client:       gcal.NewWithBase("cid", "secret", "https://api.test/cb", srv.URL),
+		Box:          box,
+		Signer:       stubSigner{},
+		JWTSecret:    "secret",
+		PublicAppURL: "https://app.test",
 	})
 }
 
@@ -437,7 +441,7 @@ func TestCompleteStoresEncryptedTokens(t *testing.T) {
 			"access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600,
 		})
 	}))
-	userID, err := svc.Complete(context.Background(), statePurpose+":host-9", "code")
+	userID, _, err := svc.Complete(context.Background(), statePurpose+":/dashboard:host-9", "code")
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -463,7 +467,7 @@ func TestCompleteRejectsBadState(t *testing.T) {
 		t.Fatal("code must not be exchanged when state fails verification")
 	}))
 	svc.signer = stubSigner{fail: true}
-	if _, err := svc.Complete(context.Background(), "forged", "code"); err == nil {
+	if _, _, err := svc.Complete(context.Background(), "forged", "code"); err == nil {
 		t.Fatal("forged state accepted")
 	}
 	if st.upserted != nil {
@@ -480,7 +484,7 @@ func TestCompleteRejectsMissingRefreshToken(t *testing.T) {
 			"access_token": "at-new", "expires_in": 3600,
 		})
 	}))
-	if _, err := svc.Complete(context.Background(), statePurpose+":host-9", "code"); err == nil {
+	if _, _, err := svc.Complete(context.Background(), statePurpose+":/dashboard:host-9", "code"); err == nil {
 		t.Fatal("accepted a grant with no refresh token")
 	}
 	if st.upserted != nil {
@@ -555,11 +559,78 @@ func TestStatusUnconnected(t *testing.T) {
 
 func TestAuthURLCarriesState(t *testing.T) {
 	svc := newTestService(t, &fakeStore{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	u, err := svc.AuthURL("host-7")
+	u, err := svc.AuthURL("host-7", "dashboard")
 	if err != nil {
 		t.Fatalf("auth url: %v", err)
 	}
-	if !strings.Contains(u, "state="+statePurpose+"%3Ahost-7") {
+	if !strings.Contains(u, "state="+statePurpose+"%3A%2Fdashboard%3Ahost-7") {
 		t.Fatalf("state not carried: %s", u)
+	}
+}
+
+// ─── Return destination allowlist ────────────────────────────────────────────
+
+// The return value survives a round-trip through Google, so anything outside
+// the closed set must collapse to the default. An open redirect here would
+// turn "connect your calendar" into a phishing primitive.
+func TestResolveReturnIsClosed(t *testing.T) {
+	if got := ResolveReturn("onboarding"); got != "/onboarding" {
+		t.Errorf("onboarding -> %q", got)
+	}
+	if got := ResolveReturn("dashboard"); got != "/dashboard" {
+		t.Errorf("dashboard -> %q", got)
+	}
+	for _, hostile := range []string{
+		"", "unknown", "//evil.example", "https://evil.example",
+		"/dashboard/../../etc", "javascript:alert(1)", "/onboarding?x=1",
+	} {
+		if got := ResolveReturn(hostile); got != "/dashboard" {
+			t.Errorf("ResolveReturn(%q) = %q, want the default /dashboard", hostile, got)
+		}
+	}
+}
+
+// Even a validly signed token gets its destination re-checked, because the
+// allowlist may have shrunk since the token was minted.
+func TestCompleteRejectsUnlistedReturnPath(t *testing.T) {
+	st := &fakeStore{}
+	svc := newTestService(t, st, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "at", "refresh_token": "rt", "expires_in": 3600,
+		})
+	}))
+	// stubSigner encodes the return path verbatim, standing in for a token
+	// signed when a now-removed destination was still allowed.
+	_, returnTo, err := svc.Complete(context.Background(), statePurpose+":https://evil.example:host-1", "code")
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if returnTo != "/dashboard" {
+		t.Fatalf("returnTo = %q, want the default /dashboard", returnTo)
+	}
+}
+
+func TestReturnPathWithoutExchange(t *testing.T) {
+	svc := newTestService(t, &fakeStore{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("ReturnPath must not call Google")
+	}))
+	if got := svc.ReturnPath(statePurpose + ":/onboarding:host-1"); got != "/onboarding" {
+		t.Fatalf("ReturnPath = %q", got)
+	}
+	if got := svc.ReturnPath(""); got != "" {
+		t.Fatalf("empty state -> %q, want \"\"", got)
+	}
+	if got := svc.ReturnPath("garbage"); got != "" {
+		t.Fatalf("unverifiable state -> %q, want \"\"", got)
+	}
+}
+
+func TestRedirectToBuildsAbsoluteURL(t *testing.T) {
+	svc := newTestService(t, &fakeStore{}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	if got := svc.RedirectTo("/onboarding"); got != "https://app.test/onboarding" {
+		t.Errorf("RedirectTo(/onboarding) = %q", got)
+	}
+	if got := svc.RedirectTo(""); got != "https://app.test/dashboard" {
+		t.Errorf("RedirectTo(\"\") = %q, want the default", got)
 	}
 }

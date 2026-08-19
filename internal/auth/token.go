@@ -19,6 +19,11 @@ type Claims struct {
 	// through a browser redirect and a third party's servers, so it must never
 	// be usable as an API credential if it leaks into a log or a referrer.
 	Purpose string `json:"pur,omitempty"`
+	// Return is where to send the browser after a purpose flow completes.
+	// Signed so the OAuth round-trip cannot be steered to an arbitrary
+	// destination by editing the state parameter; the caller still validates
+	// it against a closed allowlist before signing and after verifying.
+	Return string `json:"ret,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -64,6 +69,12 @@ func VerifyAccessToken(tokenStr, secret string) (*Claims, error) {
 //
 // Keep TTLs tight. A state token only needs to outlive a consent screen.
 func SignPurposeToken(userID, purpose, secret string, ttl time.Duration) (string, error) {
+	return SignPurposeTokenWithReturn(userID, purpose, "", secret, ttl)
+}
+
+// SignPurposeTokenWithReturn is SignPurposeToken plus a return destination
+// carried inside the signature.
+func SignPurposeTokenWithReturn(userID, purpose, returnTo, secret string, ttl time.Duration) (string, error) {
 	if purpose == "" {
 		return "", fmt.Errorf("purpose is required")
 	}
@@ -73,6 +84,7 @@ func SignPurposeToken(userID, purpose, secret string, ttl time.Duration) (string
 	claims := Claims{
 		UserID:  userID,
 		Purpose: purpose,
+		Return:  returnTo,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -85,6 +97,12 @@ func SignPurposeToken(userID, purpose, secret string, ttl time.Duration) (string
 // for the purpose the caller expects. The purpose check is what stops a state
 // token from being replayed against a different flow later.
 func VerifyPurposeToken(tokenStr, purpose, secret string) (string, error) {
+	userID, _, err := VerifyPurposeTokenWithReturn(tokenStr, purpose, secret)
+	return userID, err
+}
+
+// VerifyPurposeTokenWithReturn also yields the signed return destination.
+func VerifyPurposeTokenWithReturn(tokenStr, purpose, secret string) (string, string, error) {
 	t, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
@@ -92,19 +110,19 @@ func VerifyPurposeToken(tokenStr, purpose, secret string) (string, error) {
 		return []byte(secret), nil
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	claims, ok := t.Claims.(*Claims)
 	if !ok || !t.Valid {
-		return "", fmt.Errorf("invalid claims")
+		return "", "", fmt.Errorf("invalid claims")
 	}
 	if claims.UserID == "" {
-		return "", fmt.Errorf("missing user id")
+		return "", "", fmt.Errorf("missing user id")
 	}
 	if claims.Purpose != purpose {
-		return "", fmt.Errorf("wrong token purpose")
+		return "", "", fmt.Errorf("wrong token purpose")
 	}
-	return claims.UserID, nil
+	return claims.UserID, claims.Return, nil
 }
 
 // SignGuestToken creates a room-scoped JWT for unauthenticated call participants.

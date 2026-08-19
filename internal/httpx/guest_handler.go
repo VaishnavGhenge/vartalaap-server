@@ -12,8 +12,8 @@ import (
 
 // GuestTokenDeps bundles collaborators for the guest token endpoint.
 type GuestTokenDeps struct {
-	Store     store.Storer
-	JWTSecret string
+	Store      store.Storer
+	JWTSecret  string
 	RoomWindow BookingRoomWindow
 }
 

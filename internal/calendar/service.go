@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/vaishnavghenge/vartalaap-server/internal/gcal"
@@ -91,8 +92,28 @@ type Status struct {
 // rather than imported so the OAuth state format stays swappable and the
 // package has no opinion about JWTs.
 type TokenSigner interface {
-	SignPurposeToken(userID, purpose, secret string, ttl time.Duration) (string, error)
-	VerifyPurposeToken(tokenStr, purpose, secret string) (string, error)
+	SignPurposeToken(userID, purpose, returnTo, secret string, ttl time.Duration) (string, error)
+	VerifyPurposeToken(tokenStr, purpose, secret string) (userID, returnTo string, err error)
+}
+
+// returnPaths is the closed set of destinations the OAuth callback may bounce
+// a browser to, keyed by the token callers pass as ?return=. Closed on purpose:
+// the value survives a round-trip through Google, and an open redirect is
+// exactly the bug that turns "connect your calendar" into a phishing primitive.
+var returnPaths = map[string]string{
+	"dashboard":  "/dashboard",
+	"onboarding": "/onboarding",
+}
+
+const defaultReturn = "dashboard"
+
+// ResolveReturn maps a caller-supplied key to a path, falling back to the
+// dashboard for anything unrecognised.
+func ResolveReturn(key string) string {
+	if p, ok := returnPaths[key]; ok {
+		return p
+	}
+	return returnPaths[defaultReturn]
 }
 
 type Service struct {
@@ -102,37 +123,39 @@ type Service struct {
 	signer TokenSigner
 	secret string
 
-	// successRedirect / failureRedirect are the browser destinations after the
-	// OAuth callback completes. The callback is a top-level navigation, so it
-	// has to end somewhere a human can see.
-	successRedirect string
-	failureRedirect string
+	// publicAppURL is the frontend base the callback bounces back to. The
+	// callback is a top-level navigation, so it has to end somewhere a human
+	// can see.
+	publicAppURL string
 }
 
 type Options struct {
-	Store           store.Storer
-	Client          *gcal.Client
-	Box             *secretbox.Box
-	Signer          TokenSigner
-	JWTSecret       string
-	SuccessRedirect string
-	FailureRedirect string
+	Store        store.Storer
+	Client       *gcal.Client
+	Box          *secretbox.Box
+	Signer       TokenSigner
+	JWTSecret    string
+	PublicAppURL string
 }
 
 func NewService(o Options) *Service {
 	return &Service{
-		store:           o.Store,
-		client:          o.Client,
-		box:             o.Box,
-		signer:          o.Signer,
-		secret:          o.JWTSecret,
-		successRedirect: o.SuccessRedirect,
-		failureRedirect: o.FailureRedirect,
+		store:        o.Store,
+		client:       o.Client,
+		box:          o.Box,
+		signer:       o.Signer,
+		secret:       o.JWTSecret,
+		publicAppURL: strings.TrimSuffix(o.PublicAppURL, "/"),
 	}
 }
 
-func (s *Service) SuccessRedirect() string { return s.successRedirect }
-func (s *Service) FailureRedirect() string { return s.failureRedirect }
+// RedirectTo builds the absolute browser destination for a return path.
+func (s *Service) RedirectTo(path string) string {
+	if path == "" {
+		path = returnPaths[defaultReturn]
+	}
+	return s.publicAppURL + path
+}
 
 // ─── OAuth lifecycle ─────────────────────────────────────────────────────────
 
@@ -140,8 +163,10 @@ func (s *Service) FailureRedirect() string { return s.failureRedirect }
 // a signed, 10-minute, purpose-scoped token carrying the user ID, which is how
 // the callback identifies the host: the callback is a browser navigation from
 // Google and carries no Authorization header of ours.
-func (s *Service) AuthURL(userID string) (string, error) {
-	state, err := s.signer.SignPurposeToken(userID, statePurpose, s.secret, stateTTL)
+// returnKey names where to send the browser afterwards; unrecognised values
+// fall back to the dashboard.
+func (s *Service) AuthURL(userID, returnKey string) (string, error) {
+	state, err := s.signer.SignPurposeToken(userID, statePurpose, ResolveReturn(returnKey), s.secret, stateTTL)
 	if err != nil {
 		return "", fmt.Errorf("calendar: sign state: %w", err)
 	}
@@ -150,32 +175,41 @@ func (s *Service) AuthURL(userID string) (string, error) {
 
 // Complete handles the OAuth callback: verify state, exchange the code, and
 // store encrypted tokens. Returns the user ID so the caller can log it.
-func (s *Service) Complete(ctx context.Context, state, code string) (string, error) {
-	userID, err := s.signer.VerifyPurposeToken(state, statePurpose, s.secret)
+// Complete returns the user ID and the destination path the browser should be
+// sent to, so a host who connects mid-onboarding resumes the wizard instead of
+// being dropped on the dashboard.
+func (s *Service) Complete(ctx context.Context, state, code string) (string, string, error) {
+	userID, returnTo, err := s.signer.VerifyPurposeToken(state, statePurpose, s.secret)
 	if err != nil {
 		// Expired consent screen, tampered state, or a stray callback. All of
 		// them mean the same thing to the host: start again.
-		return "", fmt.Errorf("calendar: invalid state: %w", err)
+		return "", "", fmt.Errorf("calendar: invalid state: %w", err)
+	}
+	// Re-validate after verification. The claim is signed, but the allowlist is
+	// the thing that actually bounds the destination, and it may have shrunk
+	// since the token was minted.
+	if _, ok := pathAllowed(returnTo); !ok {
+		returnTo = returnPaths[defaultReturn]
 	}
 	tokens, err := timedCall(ctx, "exchange", func(ctx context.Context) (gcal.Tokens, error) {
 		return s.client.Exchange(ctx, code)
 	})
 	if err != nil {
-		return userID, fmt.Errorf("calendar: exchange: %w", err)
+		return userID, returnTo, fmt.Errorf("calendar: exchange: %w", err)
 	}
 	if tokens.RefreshToken == "" {
 		// AuthCodeURL sets prompt=consent precisely so this cannot happen. If
 		// it does, storing the connection would produce a calendar that works
 		// for one hour and then silently stops — worse than refusing now.
-		return userID, errors.New("calendar: google returned no refresh token")
+		return userID, returnTo, errors.New("calendar: google returned no refresh token")
 	}
 	encAccess, err := s.box.Encrypt(tokens.AccessToken)
 	if err != nil {
-		return userID, fmt.Errorf("calendar: encrypt access token: %w", err)
+		return userID, returnTo, fmt.Errorf("calendar: encrypt access token: %w", err)
 	}
 	encRefresh, err := s.box.Encrypt(tokens.RefreshToken)
 	if err != nil {
-		return userID, fmt.Errorf("calendar: encrypt refresh token: %w", err)
+		return userID, returnTo, fmt.Errorf("calendar: encrypt refresh token: %w", err)
 	}
 	var accountEmail *string
 	if tokens.AccountEmail != "" {
@@ -191,10 +225,38 @@ func (s *Service) Complete(ctx context.Context, state, code string) (string, err
 		ExpiresAt:    &expires,
 		CalendarID:   "primary",
 	}); err != nil {
-		return userID, fmt.Errorf("calendar: store connection: %w", err)
+		return userID, returnTo, fmt.Errorf("calendar: store connection: %w", err)
 	}
 	slog.Info("calendar: connected", "user_id", userID, "account", tokens.AccountEmail)
-	return userID, nil
+	return userID, returnTo, nil
+}
+
+// ReturnPath recovers the destination from a state token WITHOUT completing
+// the exchange. The denial path needs it: there is no code to trade, but the
+// host should still land back where they started. Returns "" for anything it
+// cannot verify, which the caller reads as "use the default".
+func (s *Service) ReturnPath(state string) string {
+	if state == "" {
+		return ""
+	}
+	_, returnTo, err := s.signer.VerifyPurposeToken(state, statePurpose, s.secret)
+	if err != nil {
+		return ""
+	}
+	if _, ok := pathAllowed(returnTo); !ok {
+		return ""
+	}
+	return returnTo
+}
+
+// pathAllowed reports whether a path is one of the allowlisted destinations.
+func pathAllowed(path string) (string, bool) {
+	for _, p := range returnPaths {
+		if p == path {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // Disconnect revokes the grant at Google and forgets it locally.
@@ -515,12 +577,12 @@ type BookingSync interface {
 
 // Connector is what the /me/calendar handlers depend on.
 type Connector interface {
-	AuthURL(userID string) (string, error)
-	Complete(ctx context.Context, state, code string) (string, error)
+	AuthURL(userID, returnKey string) (string, error)
+	Complete(ctx context.Context, state, code string) (userID, returnTo string, err error)
 	Disconnect(ctx context.Context, userID string) error
 	Status(ctx context.Context, userID string) (Status, error)
-	SuccessRedirect() string
-	FailureRedirect() string
+	ReturnPath(state string) string
+	RedirectTo(path string) string
 }
 
 var (

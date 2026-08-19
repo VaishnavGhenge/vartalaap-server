@@ -11,12 +11,12 @@ import (
 // so tests can substitute a trivial signer.
 type JWTSigner struct{}
 
-func (JWTSigner) SignPurposeToken(userID, purpose, secret string, ttl time.Duration) (string, error) {
-	return auth.SignPurposeToken(userID, purpose, secret, ttl)
+func (JWTSigner) SignPurposeToken(userID, purpose, returnTo, secret string, ttl time.Duration) (string, error) {
+	return auth.SignPurposeTokenWithReturn(userID, purpose, returnTo, secret, ttl)
 }
 
-func (JWTSigner) VerifyPurposeToken(tokenStr, purpose, secret string) (string, error) {
-	return auth.VerifyPurposeToken(tokenStr, purpose, secret)
+func (JWTSigner) VerifyPurposeToken(tokenStr, purpose, secret string) (string, string, error) {
+	return auth.VerifyPurposeTokenWithReturn(tokenStr, purpose, secret)
 }
 
 var _ TokenSigner = JWTSigner{}

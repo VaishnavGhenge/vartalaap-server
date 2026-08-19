@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -173,15 +172,13 @@ func main() {
 			if err != nil {
 				log.Fatalf("calendar: CALENDAR_ENCRYPTION_KEY: %v", err)
 			}
-			dashboardURL := strings.TrimSuffix(cfg.PublicAppURL, "/") + "/dashboard"
 			calSvc = calendar.NewService(calendar.Options{
-				Store:           st,
-				Client:          gcal.New(cfg.GoogleClientID, cfg.GoogleClientSecret, cfg.GoogleRedirectURL),
-				Box:             box,
-				Signer:          calendar.JWTSigner{},
-				JWTSecret:       cfg.JWTSecret,
-				SuccessRedirect: dashboardURL,
-				FailureRedirect: dashboardURL,
+				Store:        st,
+				Client:       gcal.New(cfg.GoogleClientID, cfg.GoogleClientSecret, cfg.GoogleRedirectURL),
+				Box:          box,
+				Signer:       calendar.JWTSigner{},
+				JWTSecret:    cfg.JWTSecret,
+				PublicAppURL: cfg.PublicAppURL,
 			})
 		}
 

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"github.com/vaishnavghenge/vartalaap-server/internal/db"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"

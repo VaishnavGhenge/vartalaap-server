@@ -220,7 +220,7 @@ func TestCreateEventType_SoloPlanAllowsPaid(t *testing.T) {
 
 func TestCreateEventType_ValidationErrors(t *testing.T) {
 	cases := []struct {
-		name string
+		name   string
 		mutate func(*eventTypeDTO)
 		want   string
 	}{

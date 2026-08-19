@@ -56,7 +56,7 @@ var table = map[string]Limits{
 		MonthlyBookings:   Unlimited,
 		ActiveEventTypes:  Unlimited,
 		PaidEvents:        true,
-		PriceCentsMonthly: 1200, // $12/mo
+		PriceCentsMonthly: 1200,  // $12/mo
 		PriceCentsAnnual:  10800, // $108/yr — 2 months free
 	},
 	Teams: {

@@ -13,9 +13,9 @@ import (
 // Field is set when the error is tied to a specific input — most validation
 // errors. The browser uses it to highlight the right form control.
 type errorResponse struct {
-	Error   string `json:"error"`
-	Code    string `json:"code,omitempty"`
-	Field   string `json:"field,omitempty"`
+	Error string `json:"error"`
+	Code  string `json:"code,omitempty"`
+	Field string `json:"field,omitempty"`
 }
 
 // WriteJSON marshals v with the given status and the standard headers.
@@ -43,9 +43,9 @@ func WriteFieldError(w http.ResponseWriter, status int, err error) {
 	var fe *FieldError
 	if errors.As(err, &fe) {
 		WriteJSON(w, status, errorResponse{
-			Error:   fe.Message,
-			Code:    fe.Code,
-			Field:   fe.Field,
+			Error: fe.Message,
+			Code:  fe.Code,
+			Field: fe.Field,
 		})
 		return
 	}

@@ -3,10 +3,10 @@ package signaling
 import "sync"
 
 type Room struct {
-	id         string
-	mu         sync.RWMutex
-	members    map[string]*Client
-	sfuTracks  map[string]SfuTracksData // peerID → published tracks
+	id        string
+	mu        sync.RWMutex
+	members   map[string]*Client
+	sfuTracks map[string]SfuTracksData // peerID → published tracks
 }
 
 func newRoom(id string) *Room {

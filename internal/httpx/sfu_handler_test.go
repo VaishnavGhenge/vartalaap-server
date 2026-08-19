@@ -482,7 +482,7 @@ func TestSFUSessionRoute_GuestTokenForWrongRoomReturns403(t *testing.T) {
 // A regular (non-guest) user token has no RoomID claim, so the scope guard
 // must be a no-op for them — they're already gated by other handlers (room
 // access gate). Without this distinction, the SFU would be unreachable for
-// real users. This pins the "guestRoom != ''" half of the guard.
+// real users. This pins the "guestRoom != ”" half of the guard.
 func TestSFUCreateSession_RegularUserTokenHasNoRoomScopeRestriction(t *testing.T) {
 	cf := newFakeCFServer("cf-session-user", cfrealtime.TracksNewResponse{})
 	defer cf.close()

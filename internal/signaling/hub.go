@@ -12,10 +12,10 @@ import (
 )
 
 type Hub struct {
-	mu             sync.Mutex
-	rooms          map[string]*Room
-	onRoomEmpty    func(roomID string)
-	guestTokenFn   func(peerID, roomID string) (string, error)
+	mu           sync.Mutex
+	rooms        map[string]*Room
+	onRoomEmpty  func(roomID string)
+	guestTokenFn func(peerID, roomID string) (string, error)
 }
 
 func NewHub() *Hub {
