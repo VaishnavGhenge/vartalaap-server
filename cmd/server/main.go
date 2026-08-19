@@ -8,20 +8,24 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/getsentry/sentry-go"
 	sentryhttp "github.com/getsentry/sentry-go/http"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/vaishnavghenge/vartalaap-server/internal/auth"
+	"github.com/vaishnavghenge/vartalaap-server/internal/calendar"
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfrealtime"
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfturn"
 	"github.com/vaishnavghenge/vartalaap-server/internal/config"
 	"github.com/vaishnavghenge/vartalaap-server/internal/db"
 	"github.com/vaishnavghenge/vartalaap-server/internal/email"
+	"github.com/vaishnavghenge/vartalaap-server/internal/gcal"
 	"github.com/vaishnavghenge/vartalaap-server/internal/httpx"
 	_ "github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 	"github.com/vaishnavghenge/vartalaap-server/internal/roomaccess"
+	"github.com/vaishnavghenge/vartalaap-server/internal/secretbox"
 	"github.com/vaishnavghenge/vartalaap-server/internal/sfu"
 	"github.com/vaishnavghenge/vartalaap-server/internal/signaling"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
@@ -157,6 +161,30 @@ func main() {
 			SecureCookie:   cfg.SecureCookie,
 		}
 		mailer := email.NewFromEnv()
+
+		// Calendar sync is optional. When credentials are absent calSvc stays
+		// nil and every consumer degrades to the pre-Phase-3 behaviour: no busy
+		// overlay, no write-back, /me/calendar reports unavailable. A bad
+		// encryption key is a different matter and stops the boot — starting
+		// with an unreadable key would silently revoke every host's calendar.
+		var calSvc *calendar.Service
+		if cfg.CalendarEnabled() {
+			box, err := secretbox.NewFromEncodedKey(cfg.CalendarEncryptionKey)
+			if err != nil {
+				log.Fatalf("calendar: CALENDAR_ENCRYPTION_KEY: %v", err)
+			}
+			dashboardURL := strings.TrimSuffix(cfg.PublicAppURL, "/") + "/dashboard"
+			calSvc = calendar.NewService(calendar.Options{
+				Store:           st,
+				Client:          gcal.New(cfg.GoogleClientID, cfg.GoogleClientSecret, cfg.GoogleRedirectURL),
+				Box:             box,
+				Signer:          calendar.JWTSigner{},
+				JWTSecret:       cfg.JWTSecret,
+				SuccessRedirect: dashboardURL,
+				FailureRedirect: dashboardURL,
+			})
+		}
+
 		bookingDeps := httpx.BookingDeps{
 			Mailer:       mailer,
 			PublicAppURL: cfg.PublicAppURL,
@@ -164,6 +192,13 @@ func main() {
 				OpenBefore: cfg.BookingRoomOpenBefore,
 				CloseAfter: cfg.BookingRoomCloseAfter,
 			},
+		}
+		// Assigned only when the service exists: a typed nil in an interface
+		// field is non-nil to `!= nil` checks, which would defeat every
+		// nil-guard downstream.
+		if calSvc != nil {
+			bookingDeps.Busy = calSvc
+			bookingDeps.CalendarSync = calSvc
 		}
 		getBookingStatus = func(ctx context.Context, room string) (httpx.RoomStatusResult, bool) {
 			b, err := st.GetBookingByMeetCode(ctx, room)
@@ -219,6 +254,15 @@ func main() {
 		httpx.BookingHandlers(mux, st, authCfg, bookingDeps)
 		httpx.SlotHandlers(mux, st, authCfg, bookingDeps)
 		httpx.HoldHandlers(mux, st, authCfg)
+		if calSvc != nil {
+			httpx.CalendarHandlers(mux, authCfg, calSvc)
+			log.Println("Calendar endpoints enabled: /me/calendar/{status,connect/google,callback/google,disconnect}")
+		} else {
+			// Still mount the routes so the dashboard gets a clean
+			// "unavailable" answer instead of a 404 it has to special-case.
+			httpx.CalendarHandlers(mux, authCfg, nil)
+			log.Println("Calendar endpoints mounted in unavailable mode")
+		}
 		log.Println("Auth endpoints enabled")
 		log.Println("Scheduling endpoints enabled: /me/availability, /me/event-types")
 		log.Println("Booking endpoints enabled: /bookings, /me/bookings")

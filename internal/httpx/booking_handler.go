@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/vaishnavghenge/vartalaap-server/internal/auth"
+	"github.com/vaishnavghenge/vartalaap-server/internal/calendar"
 	"github.com/vaishnavghenge/vartalaap-server/internal/email"
+	"github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 	"github.com/vaishnavghenge/vartalaap-server/internal/plans"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
@@ -23,6 +25,15 @@ type BookingDeps struct {
 	Mailer       email.Mailer
 	PublicAppURL string
 	RoomWindow   BookingRoomWindow
+
+	// Busy reads the host's external-calendar busy windows so slot generation
+	// and booking creation both see them. Nil when calendar sync is not
+	// configured, which every call site must tolerate.
+	Busy calendar.BusySource
+	// CalendarSync mirrors bookings into the host's calendar. Nil-safe for the
+	// same reason. Neither of its methods returns an error by design: a
+	// calendar write must never be able to fail a booking.
+	CalendarSync calendar.BookingSync
 }
 
 type BookingRoomWindow struct {
@@ -285,6 +296,25 @@ func handleCreateBooking(st store.Storer, deps BookingDeps) http.HandlerFunc {
 			return
 		}
 
+		// External calendar conflict. Checked here as well as in /slots because
+		// the picker's view can be seconds stale — the host may have accepted a
+		// meeting in Google between the guest loading slots and submitting.
+		//
+		// Fails OPEN: if Google is unreachable we take the booking rather than
+		// turning a Google outage into a Sessionly outage. The host is emailed
+		// either way and can cancel. The alternative — rejecting bookings we
+		// cannot prove are conflict-free — loses real revenue to someone else's
+		// downtime. vartalaap_calendar_busy_degraded_total counts these.
+		if busyErr := checkExternalBusyConflict(r.Context(), deps, host.ID, *event, startsAt.UTC(), endsAt.UTC()); busyErr != nil {
+			if errors.Is(busyErr, errSlotTaken) {
+				WriteError(w, http.StatusConflict, "SLOT_TAKEN",
+					"this slot is no longer available")
+				return
+			}
+			slog.Warn("bookings: calendar busy check degraded", "err", busyErr, "host_id", host.ID)
+			metrics.CalendarBusyDegraded.Inc()
+		}
+
 		// Monthly booking cap. CountBookingsInMonth uses created_at (bookings
 		// *taken* this month, not sessions delivered). The limit is defined in
 		// internal/plans — change it there, not here.
@@ -356,6 +386,7 @@ func handleCreateBooking(st store.Storer, deps BookingDeps) http.HandlerFunc {
 		}
 
 		sendBookingEmails(r.Context(), deps, created, event, host, guestName, guestEmail)
+		syncBookingToCalendar(r.Context(), deps, created, event, host)
 
 		WriteJSON(w, http.StatusCreated, toBookingDTOWithWindow(*created, event, host, deps.RoomWindow))
 	}
@@ -399,6 +430,69 @@ func sendBookingEmails(ctx context.Context, deps BookingDeps, b *store.Booking, 
 	}
 }
 
+// checkExternalBusyConflict overlays the host's external calendar on a
+// candidate booking. Returns errSlotTaken on a genuine overlap, a non-sentinel
+// error when the lookup itself failed, and nil when the slot is clear or no
+// calendar is connected.
+func checkExternalBusyConflict(ctx context.Context, deps BookingDeps, hostID string, event store.EventType, startsAt, endsAt time.Time) error {
+	if deps.Busy == nil {
+		return nil
+	}
+	bufferBefore := time.Duration(event.BufferBeforeMin) * time.Minute
+	bufferAfter := time.Duration(event.BufferMin) * time.Minute
+	busy, err := deps.Busy.BusyPeriods(ctx, hostID,
+		startsAt.Add(-bufferBefore), endsAt.Add(bufferAfter))
+	if err != nil {
+		return err
+	}
+	if isSlotConflicted(startsAt, endsAt.Sub(startsAt), bufferBefore, bufferAfter, busyAsBookings(busy)) {
+		return errSlotTaken
+	}
+	return nil
+}
+
+// syncBookingToCalendar mirrors a confirmed booking into the host's calendar.
+// Synchronous by design: CLAUDE.md forbids fire-and-forget goroutines, and the
+// same reasoning as sendBookingEmails applies — a bounded call on the request
+// path is easier to reason about than a background worker whose failures
+// nobody sees. The 8-second cap covers gcal's three-attempt retry schedule.
+func syncBookingToCalendar(ctx context.Context, deps BookingDeps, b *store.Booking, event *store.EventType, host *store.User) {
+	if deps.CalendarSync == nil || event == nil || host == nil {
+		return
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	deps.CalendarSync.SyncBookingCreated(syncCtx, calendar.BookingEvent{
+		BookingID:    b.ID,
+		HostID:       host.ID,
+		HostTimezone: host.Timezone,
+		EventTitle:   event.Title,
+		GuestName:    b.GuestName,
+		GuestEmail:   b.GuestEmail,
+		StartsAt:     b.StartsAt,
+		EndsAt:       b.EndsAt,
+		MeetCode:     b.MeetCode,
+		RoomURL:      roomURL(deps.PublicAppURL, b.MeetCode),
+	})
+}
+
+// unsyncBookingFromCalendar removes the mirrored event after a cancellation.
+func unsyncBookingFromCalendar(ctx context.Context, deps BookingDeps, b *store.Booking) {
+	if deps.CalendarSync == nil || b == nil {
+		return
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	deps.CalendarSync.SyncBookingCancelled(syncCtx, b.HostID, b.ID)
+}
+
+// roomURL builds the absolute join link. Mirrors the email package's link
+// construction so a host clicking through from their calendar and a guest
+// clicking through from their inbox land on the same URL.
+func roomURL(publicAppURL, meetCode string) string {
+	return strings.TrimSuffix(publicAppURL, "/") + "/room/" + meetCode
+}
+
 // handleHostCancelBooking soft-cancels a booking the authed host owns. We
 // scope by host_id rather than just bookingID so a token leak can't be used
 // to cancel another host's bookings via a known UUID. Returns 204 on success,
@@ -437,6 +531,7 @@ func handleHostCancelBooking(st store.Storer, deps BookingDeps, id string) http.
 		host, _ := st.GetUserByID(r.Context(), b.HostID)
 		event, _ := st.GetEventType(r.Context(), b.HostID, b.EventTypeID)
 		sendCancellationEmails(r.Context(), deps, b, event, host, "host")
+		unsyncBookingFromCalendar(r.Context(), deps, b)
 		slog.Info("bookings: host cancelled", "booking_id", b.ID, "user_id", userID)
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -482,6 +577,7 @@ func handleGuestCancelBooking(st store.Storer, deps BookingDeps, code string) ht
 		host, _ := st.GetUserByID(r.Context(), b.HostID)
 		event, _ := st.GetEventType(r.Context(), b.HostID, b.EventTypeID)
 		sendCancellationEmails(r.Context(), deps, b, event, host, "guest")
+		unsyncBookingFromCalendar(r.Context(), deps, b)
 		slog.Info("bookings: guest cancelled", "booking_id", b.ID, "meet_code", code)
 		w.WriteHeader(http.StatusNoContent)
 	}

@@ -1,0 +1,12 @@
+# Keep the build context small: everything below is either rebuilt in the
+# image, secret, or irrelevant to compiling the server.
+.git
+.env
+.env.*
+*.md
+deploy/
+docker-compose.yml
+run.sh
+vartalaap
+coverage/
+test-results/

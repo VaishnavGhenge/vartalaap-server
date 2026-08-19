@@ -26,6 +26,18 @@ type Config struct {
 	BookingRoomCloseAfter time.Duration
 	InstantRoomTTL        time.Duration
 	InstantRoomEmptyGrace time.Duration
+	// Google Calendar sync (Phase 3). All four must be set for the feature to
+	// activate; with any missing, /me/calendar reports unavailable and slot
+	// generation runs without busy-period overlay.
+	//
+	// GoogleRedirectURL must byte-match a redirect URI registered in the Google
+	// Cloud console, so it is explicit rather than derived from PublicAppURL —
+	// it points at this SERVER's callback route, not the frontend.
+	GoogleClientID        string
+	GoogleClientSecret    string
+	GoogleRedirectURL     string
+	CalendarEncryptionKey string
+
 	// PublicAppURL is the canonical base URL the booking surface lives at —
 	// used to build absolute room/confirmation links in transactional emails.
 	// Falls back to the first AllowedOrigins entry so dev environments work
@@ -51,6 +63,10 @@ func Load() Config {
 		InstantRoomTTL:        parseDuration(getenv("INSTANT_ROOM_TTL", "12h")),
 		InstantRoomEmptyGrace: parseDuration(getenv("INSTANT_ROOM_EMPTY_GRACE", "30m")),
 		PublicAppURL:          os.Getenv("PUBLIC_APP_URL"),
+		GoogleClientID:        os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:    os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirectURL:     os.Getenv("GOOGLE_REDIRECT_URL"),
+		CalendarEncryptionKey: os.Getenv("CALENDAR_ENCRYPTION_KEY"),
 	}
 	if cfg.PublicAppURL == "" && len(cfg.AllowedOrigins) > 0 {
 		cfg.PublicAppURL = cfg.AllowedOrigins[0]
@@ -67,7 +83,19 @@ func Load() Config {
 	if cfg.JWTSecret == "" {
 		log.Println("WARN: JWT_SECRET not set — auth endpoints will be unavailable")
 	}
+	if !cfg.CalendarEnabled() {
+		log.Println("WARN: Google Calendar sync disabled (need GOOGLE_CLIENT_ID, " +
+			"GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URL, CALENDAR_ENCRYPTION_KEY)")
+	}
 	return cfg
+}
+
+// CalendarEnabled reports whether every credential the calendar feature needs
+// is present. Checked once at startup so the wiring in main can branch cleanly
+// instead of each handler re-deriving "is this configured".
+func (c Config) CalendarEnabled() bool {
+	return c.GoogleClientID != "" && c.GoogleClientSecret != "" &&
+		c.GoogleRedirectURL != "" && c.CalendarEncryptionKey != ""
 }
 
 func getenv(k, def string) string {

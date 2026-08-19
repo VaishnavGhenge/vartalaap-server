@@ -76,6 +76,42 @@ var (
 		Name: "vartalaap_call_setup_failures_total",
 		Help: "Call setup timeouts by root cause (no_tracks_announced, tracks_announced_not_pulled, pull_errored, peers_present_none_publishing, unknown).",
 	}, []string{"reason"})
+
+	// ─── Calendar sync (Phase 3) ────────────────────────────────────────────
+	//
+	// CalendarAPIRequests is the errors-by-type golden signal for Google
+	// Calendar. `result` separates the failures that need different responses:
+	// "revoked" means the host must reconnect (a human action), "error" and
+	// "timeout" are ours to retry or absorb. Op keeps cardinality bounded to
+	// the five calls in internal/gcal.
+	CalendarAPIRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vartalaap_calendar_api_requests_total",
+		Help: "Google Calendar API calls by operation and outcome (success, error, timeout, revoked).",
+	}, []string{"op", "result"})
+
+	CalendarAPIDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "vartalaap_calendar_api_duration_seconds",
+		Help:    "Google Calendar API latency by operation, including retries.",
+		Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 3, 5, 8, 12},
+	}, []string{"op"})
+
+	// CalendarBusyDegraded counts slot-generation requests that ran WITHOUT
+	// the host's busy data because Google was unreachable. Every increment is
+	// a booking page that could double-book. This is the alert to wire first:
+	// the failure is invisible to the guest and to the host until someone
+	// shows up to a slot the host was already busy in.
+	CalendarBusyDegraded = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "vartalaap_calendar_busy_degraded_total",
+		Help: "Slot generations that omitted Google busy periods due to a failed lookup.",
+	})
+
+	// CalendarWritebackFailures counts bookings whose calendar event could not
+	// be created or deleted. The booking itself is fine; the host's calendar is
+	// out of sync until they reconnect or the booking is re-synced.
+	CalendarWritebackFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vartalaap_calendar_writeback_failures_total",
+		Help: "Calendar event write-backs that failed, by action (create, delete).",
+	}, []string{"action"})
 )
 
 func init() {
@@ -91,5 +127,9 @@ func init() {
 		CallSetupPhase,
 		CallAttempts,
 		CallSetupFailures,
+		CalendarAPIRequests,
+		CalendarAPIDuration,
+		CalendarBusyDegraded,
+		CalendarWritebackFailures,
 	)
 }
