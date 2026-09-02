@@ -407,10 +407,12 @@ func TestHubKnockAdmit_DeliversTokenAndAnnouncesPeer(t *testing.T) {
 	}
 }
 
-// A knocking guest in an otherwise empty room cannot self-admit. The hub must
-// respond with KNOCK_NO_HOST instead of silently dropping the knock — the UI
-// needs to surface "no one's here yet, try again".
-func TestHubKnock_EmptyRoomReturnsKnockNoHost(t *testing.T) {
+// The guest-arrives-first case, which used to strand both sides: the guest
+// knocked into an empty room, got a KNOCK_NO_HOST error nothing consumed, and
+// waited out the call on the lobby screen while the host who joined a minute
+// later was never told anyone was there. Knocking alone is now valid and
+// silent, and the record it leaves is what the host gets on join.
+func TestHubKnock_EmptyRoomIsRecordedNotRejected(t *testing.T) {
 	hub := NewHub()
 	guest := testClient("peer-guest")
 	setTestClientStateAdmit(guest, "Guest", "p-guest", true)
@@ -419,17 +421,111 @@ func TestHubKnock_EmptyRoomReturnsKnockNoHost(t *testing.T) {
 
 	hub.knock(guest)
 
-	msgs := drainEnvelopes(t, guest)
-	errEnv, ok := findEnvelope(msgs, MsgError)
+	if msgs := drainEnvelopes(t, guest); len(msgs) != 0 {
+		t.Fatalf("expected no reply to a knock into an empty room, got %d: %+v", len(msgs), msgs)
+	}
+	room := hub.rooms["room-1"]
+	if got := room.pendingKnockSnapshot(); len(got) != 1 || got[0].PeerID != "peer-guest" {
+		t.Fatalf("expected the knock to be recorded, got %+v", got)
+	}
+}
+
+// The other half: a host joining a room where someone is already waiting must
+// be handed that knock, exactly as it is handed the existing peers and their
+// published tracks.
+func TestHubJoin_HostReceivesKnockFromGuestWhoArrivedFirst(t *testing.T) {
+	hub := NewHub()
+	guest := testClient("peer-guest")
+	setTestClientStateAdmit(guest, "Guest", "p-guest", true)
+	hub.join(guest, "room-1")
+	hub.knock(guest)
+	drainEnvelopes(t, guest)
+
+	host := testClient("peer-host")
+	setTestClientState(host, "Host", "p-host")
+	hub.join(host, "room-1")
+
+	msgs := drainEnvelopes(t, host)
+	env, ok := findEnvelope(msgs, MsgKnockRequest)
 	if !ok {
-		t.Fatal("expected error envelope when knocking with no other peer present")
+		t.Fatalf("host joined after a waiting guest but got no knock-request: %+v", msgs)
 	}
-	var ed ErrorData
-	if err := json.Unmarshal(errEnv.Data, &ed); err != nil {
-		t.Fatalf("unmarshal error data: %v", err)
+	if env.From != "peer-guest" {
+		t.Fatalf("knock-request from = %q, want peer-guest", env.From)
 	}
-	if ed.Code != "KNOCK_NO_HOST" {
-		t.Fatalf("expected code KNOCK_NO_HOST, got %q (msg=%q)", ed.Code, ed.Message)
+	var kd KnockRequestData
+	if err := json.Unmarshal(env.Data, &kd); err != nil {
+		t.Fatalf("unmarshal knock-request: %v", err)
+	}
+	if kd.PeerID != "peer-guest" || kd.Name != "Guest" {
+		t.Fatalf("knock-request data = %+v, want peerId=peer-guest name=Guest", kd)
+	}
+}
+
+// An un-admitted guest must not be able to admit another. Two guests waiting
+// on the same room see each other's presence, not each other's knocks.
+func TestHubJoin_KnockingGuestGetsNoKnockReplay(t *testing.T) {
+	hub := NewHub()
+	first := testClient("peer-first")
+	setTestClientStateAdmit(first, "First", "p-first", true)
+	hub.join(first, "room-1")
+	hub.knock(first)
+
+	second := testClient("peer-second")
+	setTestClientStateAdmit(second, "Second", "p-second", true)
+	hub.join(second, "room-1")
+
+	msgs := drainEnvelopes(t, second)
+	if _, ok := findEnvelope(msgs, MsgKnockRequest); ok {
+		t.Fatalf("an un-admitted guest was replayed another guest's knock: %+v", msgs)
+	}
+}
+
+// Once admitted, the knock is answered. A host joining afterwards must not be
+// asked to admit someone who is already in the call.
+func TestHubKnockAdmit_ClearsPendingKnock(t *testing.T) {
+	hub := NewHub()
+	hub.SetGuestTokenFn(func(peerID, roomID string) (string, error) { return "tok", nil })
+	host := testClient("peer-host")
+	setTestClientState(host, "Host", "p-host")
+	hub.join(host, "room-1")
+	guest := testClient("peer-guest")
+	setTestClientStateAdmit(guest, "Guest", "p-guest", true)
+	hub.join(guest, "room-1")
+	hub.knock(guest)
+	drainEnvelopes(t, host)
+	drainEnvelopes(t, guest)
+
+	hub.knockAdmit(host, "peer-guest")
+
+	later := testClient("peer-later")
+	setTestClientState(later, "Later", "p-later")
+	hub.join(later, "room-1")
+	if msgs := drainEnvelopes(t, later); func() bool { _, ok := findEnvelope(msgs, MsgKnockRequest); return ok }() {
+		t.Fatal("an admitted guest is still in the pending-knock queue")
+	}
+}
+
+// A guest who gives up and closes the tab must not stay in the admit queue of
+// everyone who joins afterwards.
+func TestHubLeaveAll_ClearsPendingKnock(t *testing.T) {
+	hub := NewHub()
+	// A sitting peer keeps the room alive across the guest's departure, so
+	// this exercises removePendingKnock rather than the room being GC'd.
+	sitter := testClient("peer-sitter")
+	setTestClientState(sitter, "Sitter", "p-sitter")
+	hub.join(sitter, "room-1")
+	guest := testClient("peer-guest")
+	setTestClientStateAdmit(guest, "Guest", "p-guest", true)
+	hub.join(guest, "room-1")
+	hub.knock(guest)
+	hub.leaveAll(guest)
+
+	host := testClient("peer-host")
+	setTestClientState(host, "Host", "p-host")
+	hub.join(host, "room-1")
+	if msgs := drainEnvelopes(t, host); func() bool { _, ok := findEnvelope(msgs, MsgKnockRequest); return ok }() {
+		t.Fatal("a departed guest is still in the pending-knock queue")
 	}
 }
 

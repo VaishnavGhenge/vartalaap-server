@@ -51,6 +51,8 @@ func (h *Hub) join(c *Client, roomID string) {
 	if replaced != nil {
 		replaced.room = ""
 		room.removeSfuTracks(replaced.id)
+		// Nobody can admit the old peer ID; the client re-knocks under its new one.
+		room.removePendingKnock(replaced.id)
 	}
 	existing := room.peerInfos()
 	room.add(c)
@@ -101,6 +103,17 @@ func (h *Hub) join(c *Client, roomID string) {
 		})
 		payload, _ := json.Marshal(Envelope{Type: MsgPeerJoined, Room: roomID, From: c.id, Data: evt})
 		room.broadcastExcept(c.id, payload)
+
+		// Replay knocks still waiting on a decision — knock()'s live broadcast
+		// went to a room this peer wasn't in yet. Admitted peers only: an
+		// un-admitted guest must not be able to admit another.
+		for _, knock := range room.pendingKnockSnapshot() {
+			if knock.PeerID == c.id {
+				continue
+			}
+			b, _ := json.Marshal(knock)
+			c.sendJSON(&Envelope{Type: MsgKnockRequest, Room: roomID, From: knock.PeerID, Data: b})
+		}
 	}
 }
 
@@ -119,6 +132,8 @@ func (h *Hub) leaveAll(c *Client) {
 	}
 	room.remove(c.id)
 	room.removeSfuTracks(c.id)
+	// A guest who leaves the lobby must not stay in later joiners' admit queues.
+	room.removePendingKnock(c.id)
 	h.gcLocked(room)
 	h.mu.Unlock()
 
@@ -276,9 +291,10 @@ func (h *Hub) SetGuestTokenFn(fn func(peerID, roomID string) (string, error)) {
 	h.guestTokenFn = fn
 }
 
-// knock broadcasts a knock-request to all other peers in c's room.
-// If the room is empty (no one else is present), it sends a KNOCK_NO_HOST
-// error back to c instead.
+// knock records a guest's request for admission and broadcasts it to the room.
+// Knocking alone is valid: the record is what a later-joining host is replayed.
+// It used to return KNOCK_NO_HOST, which nothing consumed, so a guest who
+// arrived first waited out the call and the host was never told.
 func (h *Hub) knock(c *Client) {
 	h.mu.Lock()
 	room := h.rooms[c.room]
@@ -289,24 +305,16 @@ func (h *Hub) knock(c *Client) {
 		return
 	}
 
-	peers := room.peerInfos()
-	hasOther := false
-	for _, p := range peers {
-		if p.ID != c.id {
-			hasOther = true
-			break
-		}
-	}
-	if !hasOther {
-		c.sendErrorCode("KNOCK_NO_HOST", "No one else is in the room yet.")
-		return
-	}
-
 	c.mu.RLock()
 	name := c.name
 	c.mu.RUnlock()
 
-	data, _ := json.Marshal(KnockRequestData{PeerID: c.id, Name: name})
+	knock := KnockRequestData{PeerID: c.id, Name: name}
+	// Record first. The broadcast below reaches whoever is here now; the
+	// record is what reaches whoever arrives later.
+	room.addPendingKnock(c.id, knock)
+
+	data, _ := json.Marshal(knock)
 	payload, _ := json.Marshal(Envelope{Type: MsgKnockRequest, Room: c.room, From: c.id, Data: data})
 	room.broadcastExcept(c.id, payload)
 }
@@ -339,6 +347,9 @@ func (h *Hub) knockAdmit(from *Client, targetPeerID string) {
 		from.sendError("could not issue token")
 		return
 	}
+
+	// Answered, so a peer joining in the same instant gets no replay for it.
+	room.removePendingKnock(targetPeerID)
 
 	data, _ := json.Marshal(KnockGrantedData{SfuToken: token})
 	payload, _ := json.Marshal(Envelope{Type: MsgKnockGranted, Room: from.room, Data: data})

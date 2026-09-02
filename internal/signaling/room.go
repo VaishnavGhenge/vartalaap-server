@@ -17,10 +17,19 @@ type Room struct {
 	// without it, a snapshot in flight when a peer announces would roll that
 	// announcement back and the track would go dark until the next snapshot.
 	version uint64
+	// peerID → the admission request that peer is still waiting on. Kept as
+	// room state, not a one-shot broadcast, so join() can replay it to a host
+	// who arrives after the guest.
+	pendingKnocks map[string]KnockRequestData
 }
 
 func newRoom(id string) *Room {
-	return &Room{id: id, members: make(map[string]*Client), sfuTracks: make(map[string]SfuTracksData)}
+	return &Room{
+		id:            id,
+		members:       make(map[string]*Client),
+		sfuTracks:     make(map[string]SfuTracksData),
+		pendingKnocks: make(map[string]KnockRequestData),
+	}
 }
 
 // setSfuTracks replaces the peer's stored track set wholesale. This is the
@@ -49,6 +58,38 @@ func (r *Room) removeSfuTracks(peerID string) {
 	}
 	r.version++
 	delete(r.sfuTracks, peerID)
+}
+
+// addPendingKnock records a request for admission. Re-knocking replaces the
+// entry rather than queueing a second one.
+func (r *Room) addPendingKnock(peerID string, data KnockRequestData) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pendingKnocks[peerID] = data
+}
+
+// removePendingKnock drops a knock that was answered or abandoned.
+func (r *Room) removePendingKnock(peerID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.pendingKnocks, peerID)
+}
+
+// pendingKnockSnapshot returns the knocks still waiting on a decision. Skips
+// any whose peer has since left, which would otherwise be a ghost in the
+// host's admit queue that no peer-left clears.
+func (r *Room) pendingKnockSnapshot() []KnockRequestData {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]KnockRequestData, 0, len(r.pendingKnocks))
+	for peerID, data := range r.pendingKnocks {
+		if _, ok := r.members[peerID]; !ok {
+			continue
+		}
+		out = append(out, data)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PeerID < out[j].PeerID })
+	return out
 }
 
 // sfuTrackSnapshot returns a copy of all stored sfu-tracks entries.
