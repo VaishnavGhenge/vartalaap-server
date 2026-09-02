@@ -13,7 +13,6 @@ import (
 	"github.com/vaishnavghenge/vartalaap-server/internal/auth"
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfrealtime"
 	"github.com/vaishnavghenge/vartalaap-server/internal/sfu"
-	"github.com/vaishnavghenge/vartalaap-server/internal/signaling"
 )
 
 const testSFUSecret = "sfu-test-secret-32-bytes-padded!"
@@ -43,11 +42,7 @@ func (f *fakeCFClient) CreateSession(_ interface{}) (string, error) {
 	return f.sessionID, f.createErr
 }
 
-// ─── Minimal hub and registry helpers ─────────────────────────────────────────
-
-func makeTestHub() *signaling.Hub {
-	return signaling.NewHub()
-}
+// ─── Registry helper ──────────────────────────────────────────────────────────
 
 func makeTestRegistry() *sfu.Registry {
 	return sfu.NewRegistry()
@@ -148,10 +143,9 @@ func TestSFUCreateSession_OK(t *testing.T) {
 	cf := newFakeCFServer("cf-session-abc", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	hub := makeTestHub()
 	registry := makeTestRegistry()
 	mux := http.NewServeMux()
-	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
 
 	token := makeSFUAuthToken("user-1")
 	req := sfuRequest(http.MethodPost, "/sfu/sessions/new?roomId=room-1&peerId=peer-alice&kind=publish", nil, token)
@@ -182,10 +176,9 @@ func TestSFUCreateSession_MissingBody(t *testing.T) {
 	cf := newFakeCFServer("sess", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	hub := makeTestHub()
 	registry := makeTestRegistry()
 	mux := http.NewServeMux()
-	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
 
 	token := makeSFUAuthToken("user-1")
 
@@ -207,10 +200,9 @@ func TestSFUCreateSession_Unauthenticated(t *testing.T) {
 	cf := newFakeCFServer("sess", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	hub := makeTestHub()
 	registry := makeTestRegistry()
 	mux := http.NewServeMux()
-	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
 
 	req := sfuRequest(http.MethodPost, "/sfu/sessions/new?roomId=room-1&peerId=peer-1", nil, "")
 	rec := httptest.NewRecorder()
@@ -223,12 +215,11 @@ func TestSFUCreateSession_Unauthenticated(t *testing.T) {
 
 // ─── Tests: POST /sfu/sessions/{id}/tracks/new ───────────────────────────────
 
-func setupSessionAndMux(t *testing.T, cfServer *fakeCFServer) (mux *http.ServeMux, registry *sfu.Registry, hub *signaling.Hub, sessionID, token string) {
+func setupSessionAndMux(t *testing.T, cfServer *fakeCFServer) (mux *http.ServeMux, registry *sfu.Registry, sessionID, token string) {
 	t.Helper()
-	hub = makeTestHub()
 	registry = makeTestRegistry()
 	mux = http.NewServeMux()
-	SFUHandlers(mux, hub, registry, cfServer.client(), authCfgSFU())
+	SFUHandlers(mux, registry, cfServer.client(), authCfgSFU())
 
 	sessionID = cfServer.sessionID
 	token = makeSFUAuthToken("user-1")
@@ -247,7 +238,7 @@ func TestSFUTracksNew_Publish(t *testing.T) {
 	cf := newFakeCFServer("sess-1", tracksResp)
 	defer cf.close()
 
-	mux, _, _, sessionID, token := setupSessionAndMux(t, cf)
+	mux, _, sessionID, token := setupSessionAndMux(t, cf)
 
 	body := cfrealtime.TracksNewRequest{
 		SessionDescription: &cfrealtime.SessionDescription{Type: "offer", SDP: "v=0\r\n"},
@@ -276,10 +267,9 @@ func TestSFUTracksNew_SessionNotFound(t *testing.T) {
 	cf := newFakeCFServer("sess-1", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	hub := makeTestHub()
 	registry := makeTestRegistry()
 	mux := http.NewServeMux()
-	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
 
 	token := makeSFUAuthToken("user-1")
 	body := cfrealtime.TracksNewRequest{Tracks: []cfrealtime.TrackObject{{TrackName: "audio"}}}
@@ -296,11 +286,10 @@ func TestSFUTracksNew_WrongOwner(t *testing.T) {
 	cf := newFakeCFServer("sess-1", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	hub := makeTestHub()
 	registry := makeTestRegistry()
 	registry.Register("sess-1", "user-2", "room-1", "peer-bob") // owned by user-2
 	mux := http.NewServeMux()
-	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
 
 	token := makeSFUAuthToken("user-1") // authenticated as user-1
 	body := cfrealtime.TracksNewRequest{Tracks: []cfrealtime.TrackObject{{TrackName: "audio"}}}
@@ -319,7 +308,7 @@ func TestSFURenegotiate_OK(t *testing.T) {
 	cf := newFakeCFServer("sess-1", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	mux, _, _, sessionID, token := setupSessionAndMux(t, cf)
+	mux, _, sessionID, token := setupSessionAndMux(t, cf)
 
 	body := map[string]interface{}{
 		"sessionDescription": map[string]string{
@@ -343,7 +332,7 @@ func TestSFURenegotiate_MissingSDP(t *testing.T) {
 	cf := newFakeCFServer("sess-1", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	mux, _, _, sessionID, token := setupSessionAndMux(t, cf)
+	mux, _, sessionID, token := setupSessionAndMux(t, cf)
 
 	body := map[string]interface{}{
 		"sessionDescription": map[string]string{"type": "answer"}, // sdp missing
@@ -363,7 +352,7 @@ func TestSFUClose_OK(t *testing.T) {
 	cf := newFakeCFServer("sess-1", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	mux, registry, _, sessionID, token := setupSessionAndMux(t, cf)
+	mux, registry, sessionID, token := setupSessionAndMux(t, cf)
 
 	req := sfuRequest(http.MethodDelete, fmt.Sprintf("/sfu/sessions/%s", sessionID), nil, token)
 	rec := httptest.NewRecorder()
@@ -403,10 +392,9 @@ func TestSFUCreateSession_GuestTokenForOwnRoomSucceeds(t *testing.T) {
 	cf := newFakeCFServer("cf-session-guest", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	hub := makeTestHub()
 	registry := makeTestRegistry()
 	mux := http.NewServeMux()
-	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
 
 	token := makeSFUGuestToken("guest-alice", "room-1")
 	req := sfuRequest(http.MethodPost, "/sfu/sessions/new?roomId=room-1&peerId=peer-guest&kind=publish", nil, token)
@@ -426,10 +414,9 @@ func TestSFUCreateSession_GuestTokenForWrongRoomReturns403(t *testing.T) {
 	cf := newFakeCFServer("cf-session-x", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	hub := makeTestHub()
 	registry := makeTestRegistry()
 	mux := http.NewServeMux()
-	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
 
 	token := makeSFUGuestToken("guest-alice", "room-1")
 	// Same token, different roomId in the request — must be denied.
@@ -457,12 +444,11 @@ func TestSFUSessionRoute_GuestTokenForWrongRoomReturns403(t *testing.T) {
 	cf := newFakeCFServer("sess-room1", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	hub := makeTestHub()
 	registry := makeTestRegistry()
 	// Session belongs to guest-alice in room-1.
 	registry.Register("sess-room1", "guest-alice", "room-1", "peer-alice")
 	mux := http.NewServeMux()
-	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
 
 	// Attacker holds a valid guest token but for room-2, not room-1.
 	wrongToken := makeSFUGuestToken("guest-alice", "room-2")
@@ -487,10 +473,9 @@ func TestSFUCreateSession_RegularUserTokenHasNoRoomScopeRestriction(t *testing.T
 	cf := newFakeCFServer("cf-session-user", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	hub := makeTestHub()
 	registry := makeTestRegistry()
 	mux := http.NewServeMux()
-	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
 
 	// Regular user — no RoomID claim. Should work for any room.
 	token := makeSFUAuthToken("user-1")
@@ -507,10 +492,9 @@ func TestSFUClose_NotFound(t *testing.T) {
 	cf := newFakeCFServer("sess-1", cfrealtime.TracksNewResponse{})
 	defer cf.close()
 
-	hub := makeTestHub()
 	registry := makeTestRegistry()
 	mux := http.NewServeMux()
-	SFUHandlers(mux, hub, registry, cf.client(), authCfgSFU())
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
 
 	token := makeSFUAuthToken("user-1")
 	req := sfuRequest(http.MethodDelete, "/sfu/sessions/nonexistent", nil, token)

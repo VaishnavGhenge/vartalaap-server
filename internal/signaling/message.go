@@ -30,6 +30,25 @@ const (
 	// rebroadcast to the room as sfu-tracks.
 	// Sender: browser. Receiver: server. Payload: SfuTracksData.
 	MsgSfuAnnounce MsgType = "sfu-announce"
+
+	// MsgSync asks the server for the room's complete current state. The client
+	// sends it after a signaling reconnect, and whenever it suspects its view
+	// has drifted. No payload.
+	//
+	// Sender: browser. Receiver: server.
+	MsgSync MsgType = "sync"
+
+	// MsgRoomSnapshot is that complete state: who is present and what each of
+	// them publishes, stamped with a room version. Sent in reply to MsgSync and
+	// pushed unprompted on a timer.
+	//
+	// This is what makes the protocol level-triggered. Every other message is
+	// an edge — "this peer joined", "this peer announced" — and a client that
+	// misses one has no way to notice. A snapshot lets it converge without
+	// knowing which edge it lost.
+	//
+	// Sender: server. Receiver: browser. Payload: RoomSnapshotData.
+	MsgRoomSnapshot MsgType = "room-snapshot"
 	// MsgClientMetric carries a single observation from the browser into the
 	// server-side Prometheus histograms. Used for measurements only the client
 	// can take — time-to-first-media, ICE gather time, etc. The server is the
@@ -141,6 +160,9 @@ type StatsReportData struct {
 //	call_setup_phase      value = seconds; phase ∈ {ice_gather, pub_connected,
 //	                      sub_connected, first_media}
 //	call_attempt          value ignored; result ∈ {success, timeout, error, abandoned}
+//	sfu_repair            value ignored; stage ∈ {publish, subscribe},
+//	                      rung ∈ {1, 2}, outcome ∈ {attempted, recovered} —
+//	                      the self-healing ladder's attempt/recovery pair
 //	call_setup_failure    value ignored; reason ∈ {no_tracks_announced,
 //	                      tracks_announced_not_pulled, pull_errored,
 //	                      peers_present_none_publishing, unknown} — the
@@ -149,11 +171,14 @@ type StatsReportData struct {
 // Unknown names are dropped with a debug log so a buggy client can't pollute
 // the histogram registry.
 type ClientMetricData struct {
-	Name   string  `json:"name"`
-	Value  float64 `json:"value"`
-	Phase  string  `json:"phase,omitempty"`
-	Result string  `json:"result,omitempty"`
-	Reason string  `json:"reason,omitempty"`
+	Name    string  `json:"name"`
+	Value   float64 `json:"value"`
+	Phase   string  `json:"phase,omitempty"`
+	Result  string  `json:"result,omitempty"`
+	Reason  string  `json:"reason,omitempty"`
+	Stage   string  `json:"stage,omitempty"`
+	Rung    int     `json:"rung,omitempty"`
+	Outcome string  `json:"outcome,omitempty"`
 }
 
 type KnockRequestData struct {
@@ -174,7 +199,26 @@ type SfuTrackInfo struct {
 	Mid       string `json:"mid,omitempty"`
 }
 
+// RoomSnapshotPeerTracks is one peer's published set inside a snapshot.
+type RoomSnapshotPeerTracks struct {
+	PeerID    string         `json:"peerId"`
+	SessionID string         `json:"sessionId"`
+	Tracks    []SfuTrackInfo `json:"tracks"`
+}
+
+// RoomSnapshotData is the room's complete current state. Version orders it
+// against sfu-tracks broadcasts so a client can discard a snapshot built
+// before an update it already applied.
+type RoomSnapshotData struct {
+	Version uint64                   `json:"version"`
+	Peers   []PeerInfo               `json:"peers"`
+	Tracks  []RoomSnapshotPeerTracks `json:"tracks"`
+}
+
 type SfuTracksData struct {
 	SessionID string         `json:"sessionId"`
 	Tracks    []SfuTrackInfo `json:"tracks"`
+	// Set by the server on broadcast so clients can order this against
+	// snapshots. Ignored on the inbound sfu-announce direction.
+	Version uint64 `json:"version,omitempty"`
 }

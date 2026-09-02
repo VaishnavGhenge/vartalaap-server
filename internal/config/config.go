@@ -43,6 +43,10 @@ type Config struct {
 	// Falls back to the first AllowedOrigins entry so dev environments work
 	// without extra wiring.
 	PublicAppURL string
+
+	// OpsToken gates /dashboard and /stats. Unset means those routes 404 —
+	// they used to be readable by anyone who guessed the path.
+	OpsToken string
 }
 
 func Load() Config {
@@ -67,6 +71,7 @@ func Load() Config {
 		GoogleClientSecret:    os.Getenv("GOOGLE_CLIENT_SECRET"),
 		GoogleRedirectURL:     os.Getenv("GOOGLE_REDIRECT_URL"),
 		CalendarEncryptionKey: os.Getenv("CALENDAR_ENCRYPTION_KEY"),
+		OpsToken:              os.Getenv("OPS_TOKEN"),
 	}
 	if cfg.PublicAppURL == "" && len(cfg.AllowedOrigins) > 0 {
 		cfg.PublicAppURL = cfg.AllowedOrigins[0]
@@ -82,6 +87,9 @@ func Load() Config {
 	}
 	if cfg.JWTSecret == "" {
 		log.Println("WARN: JWT_SECRET not set — auth endpoints will be unavailable")
+	}
+	if cfg.OpsToken == "" {
+		log.Println("WARN: OPS_TOKEN not set — /dashboard and /stats will return 404")
 	}
 	if !cfg.CalendarEnabled() {
 		log.Println("WARN: Google Calendar sync disabled (need GOOGLE_CLIENT_ID, " +

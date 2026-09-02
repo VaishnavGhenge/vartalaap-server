@@ -18,12 +18,24 @@ type HistogramSummary struct {
 }
 
 type CallAttemptsSummary struct {
-	Success   float64 `json:"success"`
-	Timeout   float64 `json:"timeout"`
-	Error     float64 `json:"error"`
+	// Media arrived within the SLO ceiling.
+	Success float64 `json:"success"`
+	// Media arrived, but after the ceiling. A working call, just a slow one.
+	Slow float64 `json:"slow"`
+	// The call ended with no media while a peer was publishing. The real failure.
+	Failed float64 `json:"failed"`
+	Error  float64 `json:"error"`
+	// Ended with no media and nothing was being published, so none was owed.
+	// Counted for visibility, excluded from the rate.
 	Abandoned float64 `json:"abandoned"`
-	// SuccessRatePct is success/(success+timeout+error+abandoned) × 100,
+	// Legacy: emitted by clients from before the ceiling became an observation.
+	Timeout float64 `json:"timeout"`
+	// SuccessRatePct is (success+slow)/(success+slow+failed+error+timeout) × 100,
 	// or 0 if no attempts have been recorded. SLO target ≥ 99.5%.
+	//
+	// Abandoned is in neither half: a user alone in a room who leaves has not
+	// had a call fail. Including it, as this once did, let an empty room drag
+	// down the number that is supposed to measure delivery.
 	SuccessRatePct float64 `json:"success_rate_pct"`
 }
 
@@ -44,10 +56,36 @@ type Snapshot struct {
 	HTTP HistogramSummary `json:"http_seconds"`
 	// Call setup outcome counters + derived success rate.
 	CallAttempts CallAttemptsSummary `json:"call_attempts"`
-	// Errors-by-type breakdown of setup timeouts, keyed by reason. Empty until
-	// a timeout with a known reason is recorded. A reason here should sum toward
-	// CallAttempts.Timeout (both emitted once per failed call).
+	// Errors-by-type breakdown of setups that crossed the SLO ceiling, keyed by
+	// reason. Counts slow setups as well as failed ones: a link that stalls for
+	// 12s and then recovers is the same defect as one that never recovers, so
+	// this should sum toward Slow + Failed rather than Failed alone.
 	CallSetupFailures map[string]float64 `json:"call_setup_failures"`
+}
+
+// successRatePct is the connection-success SLO: of the calls where media was
+// owed, how many delivered it.
+//
+//	(success + slow) / (success + slow + failed + error + timeout)
+//
+// slow counts as connected because it is: media arrived, the user is in a
+// working call, it just took longer than the ceiling. How long is the TTFM
+// histogram's question.
+//
+// abandoned appears on neither side. Nobody was publishing, so no media was
+// owed — a user sitting alone in a room and leaving is not a failed call, and
+// counting it as one let empty rooms drag down the delivery number.
+//
+// Legacy timeouts count as failures, which is what they meant when they were
+// emitted. Dropping them would make the historical rate look better than it was.
+func successRatePct(a CallAttemptsSummary) float64 {
+	connected := a.Success + a.Slow
+	notConnected := a.Failed + a.Error + a.Timeout
+	total := connected + notConnected
+	if total == 0 {
+		return 0
+	}
+	return 100 * connected / total
 }
 
 func Gather() Snapshot {
@@ -87,14 +125,13 @@ func Gather() Snapshot {
 
 	attempts := CallAttemptsSummary{
 		Success:   raw["vartalaap_call_attempts_total:success"],
-		Timeout:   raw["vartalaap_call_attempts_total:timeout"],
+		Slow:      raw["vartalaap_call_attempts_total:slow"],
+		Failed:    raw["vartalaap_call_attempts_total:failed"],
 		Error:     raw["vartalaap_call_attempts_total:error"],
 		Abandoned: raw["vartalaap_call_attempts_total:abandoned"],
+		Timeout:   raw["vartalaap_call_attempts_total:timeout"],
 	}
-	total := attempts.Success + attempts.Timeout + attempts.Error + attempts.Abandoned
-	if total > 0 {
-		attempts.SuccessRatePct = 100 * attempts.Success / total
-	}
+	attempts.SuccessRatePct = successRatePct(attempts)
 
 	// Pull every vartalaap_call_setup_failures_total:<reason> key into a
 	// reason→count map. Done by prefix scan rather than a fixed field list so a

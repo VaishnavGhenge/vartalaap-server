@@ -9,8 +9,8 @@ import (
 
 	"github.com/vaishnavghenge/vartalaap-server/internal/auth"
 	"github.com/vaishnavghenge/vartalaap-server/internal/cfrealtime"
+	"github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 	"github.com/vaishnavghenge/vartalaap-server/internal/sfu"
-	"github.com/vaishnavghenge/vartalaap-server/internal/signaling"
 )
 
 // SFUHandlers registers the /sfu/* proxy routes.
@@ -20,7 +20,7 @@ import (
 // (see partytracks/client). The roomId/peerId for a session are passed via
 // query params on /sfu/sessions/new so partytracks doesn't need to know
 // about our room model.
-func SFUHandlers(mux *http.ServeMux, hub *signaling.Hub, registry *sfu.Registry, cf *cfrealtime.Client, cfg AuthConfig, gates ...RoomAccessGate) {
+func SFUHandlers(mux *http.ServeMux, registry *sfu.Registry, cf *cfrealtime.Client, cfg AuthConfig, gates ...RoomAccessGate) {
 	lim := NewRateLimiter(60, 120)
 	var gate RoomAccessGate
 	if len(gates) > 0 {
@@ -38,7 +38,7 @@ func SFUHandlers(mux *http.ServeMux, hub *signaling.Hub, registry *sfu.Registry,
 		}
 	}
 
-	mux.HandleFunc("/sfu/sessions/", wrap("POST, PUT, DELETE", handleSFUSessionRoute(hub, registry, cf, gate)))
+	mux.HandleFunc("/sfu/sessions/", wrap("POST, PUT, DELETE", handleSFUSessionRoute(registry, cf, gate)))
 }
 
 func handleSFUCreateSession(registry *sfu.Registry, cf *cfrealtime.Client, gate RoomAccessGate) http.HandlerFunc {
@@ -89,7 +89,7 @@ func handleSFUCreateSession(registry *sfu.Registry, cf *cfrealtime.Client, gate 
 
 // handleSFUSessionRoute dispatches sub-paths under /sfu/sessions/{id}/...
 // Also handles /sfu/sessions/new which creates a new session.
-func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrealtime.Client, gate RoomAccessGate) http.HandlerFunc {
+func handleSFUSessionRoute(registry *sfu.Registry, cf *cfrealtime.Client, gate RoomAccessGate) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tail := strings.TrimPrefix(r.URL.Path, "/sfu/sessions/")
 		parts := strings.SplitN(tail, "/", 2)
@@ -128,7 +128,7 @@ func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrea
 
 		switch {
 		case subPath == "tracks/new" && r.Method == http.MethodPost:
-			sfuTracksNew(hub, cf, sessionID, roomID, peerID)(w, r)
+			sfuTracksNew(cf, sessionID, roomID, peerID)(w, r)
 		case subPath == "renegotiate" && r.Method == http.MethodPut:
 			sfuRenegotiate(cf, sessionID)(w, r)
 		case subPath == "tracks/update" && r.Method == http.MethodPut:
@@ -143,7 +143,7 @@ func handleSFUSessionRoute(hub *signaling.Hub, registry *sfu.Registry, cf *cfrea
 	}
 }
 
-func sfuTracksNew(hub *signaling.Hub, cf *cfrealtime.Client, sessionID, roomID, peerID string) http.HandlerFunc {
+func sfuTracksNew(cf *cfrealtime.Client, sessionID, roomID, peerID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req cfrealtime.TracksNewRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -176,24 +176,36 @@ func sfuTracksNew(hub *signaling.Hub, cf *cfrealtime.Client, sessionID, roomID, 
 			return
 		}
 
-		// After a local publish (request has sessionDescription), broadcast sfu-tracks
-		// so remote peers know to subscribe. Do not broadcast subscribe responses.
+		// A 200 here means Cloudflare ACCEPTED the offer, not that the track is
+		// live. The response still carries a sessionDescription the publisher's
+		// browser has to apply, and partytracks only emits the track metadata
+		// once that succeeds. Announcing from this point raced ahead of the
+		// publisher by ~0.5s and produced the 2026-09-01 failure: a Firefox
+		// video push that never acked, already broadcast to the room, pulled by
+		// Chrome, dead for the rest of the call. Two Sentry issues, one cause.
+		//
+		// So the announce now comes only from the publisher, over sfu-announce,
+		// after its push acks (SfuSession.onLocalTracksChanged →
+		// hub.AnnounceSfuTracks). That path is level-triggered and re-sends the
+		// full set on every change and after every reconnect, which is why this
+		// one-shot interception is not needed as a second writer.
+		//
+		// Counted rather than silent: a publish seen here with no matching
+		// announce shortly after means the ack never arrived, which is a real
+		// client-side failure we want visible instead of papered over by a
+		// server-side broadcast.
 		if req.SessionDescription != nil {
-			tracks := make([]signaling.SfuTrackInfo, 0, len(resp.Tracks))
+			local := 0
 			for _, t := range resp.Tracks {
 				if t.Location == "" || t.Location == "local" {
-					tracks = append(tracks, signaling.SfuTrackInfo{TrackName: t.TrackName, Mid: t.Mid})
+					local++
 				}
 			}
-			slog.Info("sfu: publish broadcast",
+			metrics.SfuPublishAccepted.Inc()
+			slog.Info("sfu: publish accepted (awaiting publisher ack before announce)",
 				"session", sessionID, "peer", peerID, "room", roomID,
-				"resp_tracks", len(resp.Tracks), "filtered_tracks", len(tracks))
-			if len(tracks) > 0 {
-				hub.BroadcastSfuTracks(roomID, peerID, signaling.SfuTracksData{
-					SessionID: sessionID,
-					Tracks:    tracks,
-				})
-			}
+				"resp_tracks", len(resp.Tracks), "local_tracks", local,
+				"requires_renegotiation", resp.RequiresImmediateRenegotiation)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

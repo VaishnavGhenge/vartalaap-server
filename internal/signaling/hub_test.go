@@ -164,99 +164,6 @@ func TestHubForwardStateTargetsOnePeer(t *testing.T) {
 	}
 }
 
-func TestHubBroadcastSfuTracks(t *testing.T) {
-	hub := NewHub()
-	publisher := testClient("peer-publisher")
-	subscriber1 := testClient("peer-sub1")
-	subscriber2 := testClient("peer-sub2")
-	setTestClientState(publisher, "Alice", "presence-alice")
-	setTestClientState(subscriber1, "Bob", "presence-bob")
-	setTestClientState(subscriber2, "Carol", "presence-carol")
-
-	hub.join(publisher, "room-1")
-	hub.join(subscriber1, "room-1")
-	hub.join(subscriber2, "room-1")
-	drainEnvelopes(t, publisher)
-	drainEnvelopes(t, subscriber1)
-	drainEnvelopes(t, subscriber2)
-
-	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
-		SessionID: "cf-session-abc",
-		Tracks: []SfuTrackInfo{
-			{TrackName: "audio", Mid: "0"},
-			{TrackName: "video", Mid: "1"},
-		},
-	})
-
-	// Subscribers receive sfu-tracks; publisher does not.
-	for _, sub := range []*Client{subscriber1, subscriber2} {
-		msgs := drainEnvelopes(t, sub)
-		env, ok := findEnvelope(msgs, MsgSfuTracks)
-		if !ok {
-			t.Fatalf("%s: expected sfu-tracks message", sub.id)
-		}
-		if env.From != publisher.id {
-			t.Fatalf("%s: expected From=%s, got %s", sub.id, publisher.id, env.From)
-		}
-		var data SfuTracksData
-		if err := json.Unmarshal(env.Data, &data); err != nil {
-			t.Fatalf("%s: unmarshal sfu-tracks data: %v", sub.id, err)
-		}
-		if data.SessionID != "cf-session-abc" {
-			t.Fatalf("%s: expected sessionId=cf-session-abc, got %q", sub.id, data.SessionID)
-		}
-		if len(data.Tracks) != 2 {
-			t.Fatalf("%s: expected 2 tracks, got %d", sub.id, len(data.Tracks))
-		}
-	}
-
-	if msgs := drainEnvelopes(t, publisher); len(msgs) != 0 {
-		t.Fatalf("publisher should not receive its own sfu-tracks broadcast, got %d messages", len(msgs))
-	}
-}
-
-func TestHubBroadcastSfuTracks_NoRoom(t *testing.T) {
-	hub := NewHub()
-	// BroadcastSfuTracks on a non-existent room must not panic.
-	hub.BroadcastSfuTracks("nonexistent-room", "peer-1", SfuTracksData{
-		SessionID: "sess",
-		Tracks:    []SfuTrackInfo{{TrackName: "audio"}},
-	})
-}
-
-// tracks/new is plain HTTP and can land while the publishing peer's WebSocket
-// is down (already removed from the room). Storing tracks for a non-member
-// would create a zombie entry replayed to every later joiner under a peerId
-// nobody can attribute.
-func TestHubBroadcastSfuTracks_DroppedForNonMember(t *testing.T) {
-	hub := NewHub()
-	member := testClient("peer-member")
-	setTestClientState(member, "Alice", "presence-alice")
-	hub.join(member, "room-1")
-	drainEnvelopes(t, member)
-
-	hub.BroadcastSfuTracks("room-1", "peer-gone", SfuTracksData{
-		SessionID: "cf-session-stale",
-		Tracks:    []SfuTrackInfo{{TrackName: "audio"}},
-	})
-
-	if msgs := drainEnvelopes(t, member); len(msgs) != 0 {
-		t.Fatalf("expected no broadcast for non-member publisher, got %d messages", len(msgs))
-	}
-
-	// A later joiner must not receive a replay for the non-member either.
-	late := testClient("peer-late")
-	setTestClientState(late, "Bob", "presence-bob")
-	hub.join(late, "room-1")
-	if env, ok := findEnvelope(drainEnvelopes(t, late), MsgSfuTracks); ok {
-		t.Fatalf("late joiner received zombie sfu-tracks replay from %s", env.From)
-	}
-}
-
-// sfu-announce is the self-healing path: after a signaling reconnect the
-// server's stored track set is gone and only the client can restore it. The
-// announce must be stored (for join replay) and rebroadcast (for peers that
-// tore down their subscriptions on peer-left).
 func TestHubAnnounceSfuTracks_StoresAndBroadcasts(t *testing.T) {
 	hub := NewHub()
 	publisher := testClient("peer-publisher")
@@ -298,8 +205,10 @@ func TestHubAnnounceSfuTracks_StoresAndBroadcasts(t *testing.T) {
 	}
 }
 
-// Announce replaces — it must drop track names left over from a previous CF
-// session, which the merge used by the tracks/new path would keep forever.
+// Announce replaces rather than merges. A peer whose PC was recreated
+// re-announces under a new CF sessionId, and the track names from the old
+// session are unpullable — merging would replay them to every later joiner
+// forever, which is a dead track per stale name.
 func TestHubAnnounceSfuTracks_ReplacesStoredSet(t *testing.T) {
 	hub := NewHub()
 	publisher := testClient("peer-publisher")
@@ -307,7 +216,9 @@ func TestHubAnnounceSfuTracks_ReplacesStoredSet(t *testing.T) {
 	hub.join(publisher, "room-1")
 	drainEnvelopes(t, publisher)
 
-	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
+	// Seed via announce: since the tracks/new interception stopped writing,
+	// this is the only path that stores a track set.
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
 		SessionID: "cf-session-old",
 		Tracks:    []SfuTrackInfo{{TrackName: "stale-track"}},
 	})
@@ -600,7 +511,7 @@ func TestHubJoin_LateJoinerReceivesExistingSfuTracksReplay(t *testing.T) {
 	setTestClientStateAdmit(lateJoiner, "Late", "p-late", false)
 
 	hub.join(publisher, "room-1")
-	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
 		SessionID: "cf-sess-pub",
 		Tracks: []SfuTrackInfo{
 			{TrackName: "audio", Mid: "0"},
@@ -632,52 +543,6 @@ func TestHubJoin_LateJoinerReceivesExistingSfuTracksReplay(t *testing.T) {
 		t.Errorf("expected 2 tracks replayed, got %d", len(data.Tracks))
 	}
 }
-
-// The room must MERGE sfu-tracks by trackName across multiple publishes. A peer
-// that publishes audio first, then publishes video later, must end up with BOTH
-// in the snapshot — otherwise the late-joiner replay only carries the latest
-// publish (the original bug shape: peer subscribes only to video, audio lost).
-func TestRoomStoreSfuTracks_MergesByTrackNameAcrossPublishes(t *testing.T) {
-	hub := NewHub()
-	publisher := testClient("peer-pub")
-	setTestClientStateAdmit(publisher, "Pub", "p-pub", false)
-	hub.join(publisher, "room-1")
-
-	// First publish: audio only.
-	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
-		SessionID: "cf-sess-1",
-		Tracks:    []SfuTrackInfo{{TrackName: "audio", Mid: "0"}},
-	})
-	// Later publish: video added.
-	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
-		SessionID: "cf-sess-1",
-		Tracks:    []SfuTrackInfo{{TrackName: "video", Mid: "1"}},
-	})
-
-	room := hub.rooms["room-1"]
-	snap := room.sfuTrackSnapshot()
-	merged, ok := snap[publisher.id]
-	if !ok {
-		t.Fatal("publisher's tracks not stored")
-	}
-	if len(merged.Tracks) != 2 {
-		t.Fatalf("expected merged audio+video (2 tracks), got %d: %+v", len(merged.Tracks), merged.Tracks)
-	}
-	names := map[string]bool{}
-	for _, t := range merged.Tracks {
-		names[t.TrackName] = true
-	}
-	if !names["audio"] || !names["video"] {
-		t.Errorf("expected both audio and video after merge, got %v", names)
-	}
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Room GC — when the last peer leaves, the room must be removed from the hub,
-// onRoomEmpty must fire, and sfu-tracks state must be released. A leak here
-// means orphaned rooms accumulate, which on the 1GB-RAM droplet becomes
-// observable as RSS growth.
-// ──────────────────────────────────────────────────────────────────────────────
 
 func TestHubLeaveAll_LastPeerTriggersRoomGCAndCallback(t *testing.T) {
 	hub := NewHub()
@@ -736,7 +601,7 @@ func TestHubLeaveAll_ClearsSfuTracksEntry(t *testing.T) {
 
 	hub.join(publisher, "room-1")
 	hub.join(observer, "room-1") // keeps the room alive after publisher leaves
-	hub.BroadcastSfuTracks("room-1", publisher.id, SfuTracksData{
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
 		SessionID: "cf-sess-pub",
 		Tracks:    []SfuTrackInfo{{TrackName: "audio"}},
 	})
@@ -750,5 +615,323 @@ func TestHubLeaveAll_ClearsSfuTracksEntry(t *testing.T) {
 
 	if _, ok := room.sfuTrackSnapshot()[publisher.id]; ok {
 		t.Error("publisher's sfu-tracks must be cleaned up on leave to prevent stale-track replay")
+	}
+}
+
+// The repair metric's labels are whitelisted so a buggy or hostile client
+// cannot mint unbounded Prometheus label series. These pin the boundary rather
+// than the counting, which the metrics package owns.
+func TestObserveClientMetric_SfuRepairRejectsBadLabels(t *testing.T) {
+	c := testClient("peer-1")
+	cases := []struct {
+		name string
+		data ClientMetricData
+	}{
+		{"unknown stage", ClientMetricData{Name: "sfu_repair", Stage: "sideways", Rung: 1, Outcome: "attempted"}},
+		{"unknown outcome", ClientMetricData{Name: "sfu_repair", Stage: "publish", Rung: 1, Outcome: "vibes"}},
+		{"rung below ladder", ClientMetricData{Name: "sfu_repair", Stage: "publish", Rung: 0, Outcome: "attempted"}},
+		{"rung above ladder", ClientMetricData{Name: "sfu_repair", Stage: "publish", Rung: 9, Outcome: "attempted"}},
+		{"empty labels", ClientMetricData{Name: "sfu_repair"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// A rejected metric must be a silent drop, never a panic: this runs
+			// on the WebSocket read loop and taking that down would end the call.
+			c.observeClientMetric(tc.data)
+		})
+	}
+}
+
+func TestObserveClientMetric_SfuRepairAcceptsLadderValues(t *testing.T) {
+	c := testClient("peer-1")
+	for _, stage := range []string{"publish", "subscribe"} {
+		for _, outcome := range []string{"attempted", "recovered"} {
+			for _, rung := range []int{1, 2} {
+				c.observeClientMetric(ClientMetricData{
+					Name: "sfu_repair", Stage: stage, Rung: rung, Outcome: outcome,
+				})
+			}
+		}
+	}
+}
+
+// ─── Room snapshots ───────────────────────────────────────────────────────────
+// The level-triggered half of the protocol. Every other message is an edge, and
+// a client that misses one has no way to notice; a snapshot lets it converge
+// without knowing which edge it lost.
+
+func TestHubSendSnapshot_ReturnsPeersAndTracks(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-publisher")
+	observer := testClient("peer-observer")
+	setTestClientState(publisher, "Alice", "presence-alice")
+	setTestClientState(observer, "Bob", "presence-bob")
+	hub.join(publisher, "room-1")
+	hub.join(observer, "room-1")
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
+		SessionID: "cf-alice",
+		Tracks:    []SfuTrackInfo{{TrackName: "t-audio"}, {TrackName: "t-video"}},
+	})
+	drainEnvelopes(t, observer)
+
+	hub.SendSnapshot(observer)
+
+	env, ok := findEnvelope(drainEnvelopes(t, observer), MsgRoomSnapshot)
+	if !ok {
+		t.Fatal("sync should produce a room-snapshot")
+	}
+	var snap RoomSnapshotData
+	if err := json.Unmarshal(env.Data, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	if len(snap.Peers) != 2 {
+		t.Fatalf("expected 2 peers in snapshot, got %d", len(snap.Peers))
+	}
+	if len(snap.Tracks) != 1 || snap.Tracks[0].PeerID != publisher.id {
+		t.Fatalf("expected the publisher's tracks, got %+v", snap.Tracks)
+	}
+	if len(snap.Tracks[0].Tracks) != 2 {
+		t.Fatalf("expected 2 track names, got %d", len(snap.Tracks[0].Tracks))
+	}
+	if snap.Version == 0 {
+		t.Fatal("snapshot must carry a version so clients can order it")
+	}
+}
+
+// A stored set for someone who already left would have every client subscribe
+// to a departed peer's tracks and then time them out.
+func TestHubSnapshot_OmitsTracksForDepartedPeers(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-publisher")
+	observer := testClient("peer-observer")
+	setTestClientState(publisher, "Alice", "presence-alice")
+	setTestClientState(observer, "Bob", "presence-bob")
+	hub.join(publisher, "room-1")
+	hub.join(observer, "room-1")
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
+		SessionID: "cf-alice",
+		Tracks:    []SfuTrackInfo{{TrackName: "t-audio"}},
+	})
+
+	room := hub.rooms["room-1"]
+	// Remove membership without clearing the stored set, which is the state a
+	// dropped connection leaves behind between leaveAll's two steps.
+	room.remove(publisher.id)
+
+	snap := room.snapshot()
+	if len(snap.Tracks) != 0 {
+		t.Fatalf("expected no tracks for a departed peer, got %+v", snap.Tracks)
+	}
+}
+
+// The version must advance on every mutation, otherwise a client cannot tell a
+// snapshot built before an announcement from one built after it.
+func TestRoomVersion_AdvancesOnEveryTrackMutation(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-publisher")
+	setTestClientState(publisher, "Alice", "presence-alice")
+	hub.join(publisher, "room-1")
+	room := hub.rooms["room-1"]
+
+	v0 := room.snapshot().Version
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
+		SessionID: "cf-1", Tracks: []SfuTrackInfo{{TrackName: "t-a"}},
+	})
+	v1 := room.snapshot().Version
+	if v1 <= v0 {
+		t.Fatalf("announce must advance the version: %d -> %d", v0, v1)
+	}
+
+	room.removeSfuTracks(publisher.id)
+	v2 := room.snapshot().Version
+	if v2 <= v1 {
+		t.Fatalf("removal must advance the version: %d -> %d", v1, v2)
+	}
+
+	// A no-op removal must NOT advance it: a version that moves without the
+	// state moving would make clients discard good updates.
+	room.removeSfuTracks(publisher.id)
+	if got := room.snapshot().Version; got != v2 {
+		t.Fatalf("a no-op removal must not advance the version: %d -> %d", v2, got)
+	}
+}
+
+// The broadcast a peer receives must carry the version its write landed at, so
+// it can be ordered against snapshots that arrive out of sequence.
+func TestHubAnnounceSfuTracks_BroadcastCarriesVersion(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-publisher")
+	observer := testClient("peer-observer")
+	setTestClientState(publisher, "Alice", "presence-alice")
+	setTestClientState(observer, "Bob", "presence-bob")
+	hub.join(publisher, "room-1")
+	hub.join(observer, "room-1")
+	drainEnvelopes(t, observer)
+
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
+		SessionID: "cf-1", Tracks: []SfuTrackInfo{{TrackName: "t-a"}},
+	})
+
+	env, _ := findEnvelope(drainEnvelopes(t, observer), MsgSfuTracks)
+	var data SfuTracksData
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("unmarshal sfu-tracks: %v", err)
+	}
+	if data.Version == 0 {
+		t.Fatal("broadcast sfu-tracks must carry the room version")
+	}
+}
+
+func TestHubSnapshotLoop_PushesToOccupiedPublishingRooms(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-publisher")
+	observer := testClient("peer-observer")
+	setTestClientState(publisher, "Alice", "presence-alice")
+	setTestClientState(observer, "Bob", "presence-bob")
+	hub.join(publisher, "room-1")
+	hub.join(observer, "room-1")
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
+		SessionID: "cf-1", Tracks: []SfuTrackInfo{{TrackName: "t-a"}},
+	})
+	drainEnvelopes(t, observer)
+	drainEnvelopes(t, publisher)
+
+	hub.broadcastSnapshots()
+
+	if _, ok := findEnvelope(drainEnvelopes(t, observer), MsgRoomSnapshot); !ok {
+		t.Fatal("observer should receive the pushed snapshot")
+	}
+	// The publisher gets one too: it needs the room's view of its own tracks to
+	// notice when the server's copy has drifted from what it believes it sends.
+	if _, ok := findEnvelope(drainEnvelopes(t, publisher), MsgRoomSnapshot); !ok {
+		t.Fatal("publisher should also receive the pushed snapshot")
+	}
+}
+
+// An idle room has nothing to converge on, and presence is already maintained
+// by join/leave. Pushing anyway would tick at every participant for nothing.
+func TestHubSnapshotLoop_SkipsRoomsWithNothingPublished(t *testing.T) {
+	hub := NewHub()
+	alice := testClient("peer-alice")
+	setTestClientState(alice, "Alice", "presence-alice")
+	hub.join(alice, "room-1")
+	drainEnvelopes(t, alice)
+
+	hub.broadcastSnapshots()
+
+	if _, ok := findEnvelope(drainEnvelopes(t, alice), MsgRoomSnapshot); ok {
+		t.Fatal("a room with no published tracks should not be pushed a snapshot")
+	}
+}
+
+func TestHubSnapshotLoop_StopsWhenCancelled(t *testing.T) {
+	hub := NewHub()
+	stop := hub.StartSnapshotLoop(time.Millisecond)
+	stop()
+	// Stopping twice would panic on a double close of the done channel, which
+	// is exactly the shape of bug a deferred stop plus an explicit one creates.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("stopping the snapshot loop must be safe, got panic: %v", r)
+		}
+	}()
+	time.Sleep(5 * time.Millisecond)
+}
+
+// The join replay walks a map, so its entries arrive in arbitrary order while
+// each carries the version from when that peer last announced. Left stamped, a
+// peer whose set was written earlier would look stale next to one written
+// later, and the client would discard it — losing that peer's media entirely.
+func TestHubJoin_ReplayCarriesNoVersion(t *testing.T) {
+	hub := NewHub()
+	first := testClient("peer-first")
+	second := testClient("peer-second")
+	setTestClientState(first, "Alice", "presence-alice")
+	setTestClientState(second, "Bob", "presence-bob")
+	hub.join(first, "room-1")
+	hub.join(second, "room-1")
+	hub.AnnounceSfuTracks(first, SfuTracksData{
+		SessionID: "cf-1", Tracks: []SfuTrackInfo{{TrackName: "t-a"}},
+	})
+	hub.AnnounceSfuTracks(second, SfuTracksData{
+		SessionID: "cf-2", Tracks: []SfuTrackInfo{{TrackName: "t-b"}},
+	})
+
+	late := testClient("peer-late")
+	setTestClientState(late, "Carol", "presence-carol")
+	hub.join(late, "room-1")
+
+	msgs := drainEnvelopes(t, late)
+	replays := 0
+	for _, env := range msgs {
+		if env.Type != MsgSfuTracks {
+			continue
+		}
+		replays++
+		var data SfuTracksData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			t.Fatalf("unmarshal replay: %v", err)
+		}
+		if data.Version != 0 {
+			t.Fatalf("replayed sfu-tracks must carry no version, got %d", data.Version)
+		}
+	}
+	if replays != 2 {
+		t.Fatalf("expected both publishers replayed, got %d", replays)
+	}
+
+	// And the joiner gets the authoritative view, which sets its version floor.
+	env, ok := findEnvelope(msgs, MsgRoomSnapshot)
+	if !ok {
+		t.Fatal("a joiner should receive a room-snapshot")
+	}
+	var snap RoomSnapshotData
+	if err := json.Unmarshal(env.Data, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	if snap.Version == 0 || len(snap.Tracks) != 2 {
+		t.Fatalf("unexpected join snapshot: %+v", snap)
+	}
+}
+
+// The snapshot loop walks every room on one goroutine, so a single wedged
+// client must not be able to stall it. Snapshots are best-effort for exactly
+// this reason: dropping one for a backed-up peer is correct, because another
+// arrives 15 seconds later, whereas blocking would stop convergence for every
+// other room on the server.
+func TestHubSnapshotLoop_WedgedClientDoesNotStallOthers(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-publisher")
+	wedged := testClient("peer-wedged")
+	healthy := testClient("peer-healthy")
+	setTestClientState(publisher, "Alice", "presence-alice")
+	setTestClientState(wedged, "Bob", "presence-bob")
+	setTestClientState(healthy, "Carol", "presence-carol")
+	hub.join(publisher, "room-1")
+	hub.join(wedged, "room-1")
+	hub.join(healthy, "room-1")
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
+		SessionID: "cf-1", Tracks: []SfuTrackInfo{{TrackName: "t-a"}},
+	})
+	drainEnvelopes(t, healthy)
+
+	// Bob's send queue is full and nothing is reading it.
+	for len(wedged.send) < cap(wedged.send) {
+		wedged.send <- []byte("backlog")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		hub.broadcastSnapshots()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a wedged client stalled the snapshot loop")
+	}
+
+	if _, ok := findEnvelope(drainEnvelopes(t, healthy), MsgRoomSnapshot); !ok {
+		t.Fatal("a healthy peer should still receive its snapshot")
 	}
 }

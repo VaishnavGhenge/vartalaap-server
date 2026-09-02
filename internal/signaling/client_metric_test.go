@@ -194,3 +194,35 @@ func TestObserveClientMetric_UnknownNameIsSilentlyDropped(t *testing.T) {
 		t.Errorf("unknown metric name leaked into TTFM histogram; delta=%d", after-before)
 	}
 }
+
+// The outcome split from step 5: `slow` and `failed` are what the ceiling
+// stopped deciding. Both must reach Prometheus, because the success-rate SLO
+// is now computed from them.
+func TestObserveClientMetric_CallAttemptsAcceptsSlowAndFailed(t *testing.T) {
+	c := newMetricClient()
+	for _, result := range []string{"slow", "failed"} {
+		counter := metrics.CallAttempts.WithLabelValues(result).(interface {
+			Write(*dto.Metric) error
+		})
+		before := counterValue(t, counter)
+		c.observeClientMetric(ClientMetricData{Name: "call_attempt", Result: result})
+		if got := counterValue(t, counter) - before; got != 1 {
+			t.Fatalf("expected %s counter to increment by 1, got %.0f", result, got)
+		}
+	}
+}
+
+// The client stopped emitting `timeout` when the ceiling became an observation,
+// but the label must still be accepted: historical series stay readable, and a
+// client running older code mid-rollout is not silently dropped.
+func TestObserveClientMetric_CallAttemptsStillAcceptsLegacyTimeout(t *testing.T) {
+	c := newMetricClient()
+	counter := metrics.CallAttempts.WithLabelValues("timeout").(interface {
+		Write(*dto.Metric) error
+	})
+	before := counterValue(t, counter)
+	c.observeClientMetric(ClientMetricData{Name: "call_attempt", Result: "timeout"})
+	if got := counterValue(t, counter) - before; got != 1 {
+		t.Fatalf("legacy timeout must still be counted, got %.0f", got)
+	}
+}

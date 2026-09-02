@@ -7,6 +7,7 @@ import (
 	"log"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 
@@ -170,6 +171,8 @@ func (c *Client) handle(env *Envelope) {
 		c.hub.broadcastState(c, st)
 	case MsgPing:
 		c.sendJSON(&Envelope{Type: MsgPong})
+	case MsgSync:
+		c.hub.SendSnapshot(c)
 	case MsgStatsReport:
 		var rd StatsReportData
 		if len(env.Data) > 0 {
@@ -297,7 +300,15 @@ func (c *Client) observeClientMetric(m ClientMetricData) {
 	case "call_attempt":
 		result := m.Result
 		switch result {
-		case "success", "timeout", "error", "abandoned":
+		// success and slow both mean the call worked; they differ only in
+		// whether media beat the SLO ceiling. failed means it ended with no
+		// media while a peer was publishing. abandoned means nothing was owed.
+		//
+		// "timeout" is legacy: the client stopped emitting it when the ceiling
+		// became an observation rather than a verdict. Still accepted so
+		// historical series stay readable and an older client is not silently
+		// dropped mid-rollout.
+		case "success", "slow", "failed", "error", "abandoned", "timeout":
 			metrics.CallAttempts.WithLabelValues(result).Inc()
 		default:
 			return
@@ -321,6 +332,25 @@ func (c *Client) observeClientMetric(m ClientMetricData) {
 		slog.Info("client_metric",
 			"peer_id", c.id, "room", c.room,
 			"name", m.Name, "reason", reason,
+		)
+	case "sfu_repair":
+		// Same cardinality guard as everything else here: stage, rung and
+		// outcome are all whitelisted so a buggy client cannot mint label
+		// series. Rung is bounded to the ladder SfuSession actually implements.
+		stage, outcome := m.Stage, m.Outcome
+		if stage != "publish" && stage != "subscribe" {
+			return
+		}
+		if outcome != "attempted" && outcome != "recovered" {
+			return
+		}
+		if m.Rung < 1 || m.Rung > 2 {
+			return
+		}
+		metrics.SfuRepairs.WithLabelValues(stage, strconv.Itoa(m.Rung), outcome).Inc()
+		slog.Info("client_metric",
+			"peer_id", c.id, "room", c.room,
+			"name", m.Name, "stage", stage, "rung", m.Rung, "outcome", outcome,
 		)
 	default:
 		// Unknown metric name. Logging at debug level avoids amplifying a buggy

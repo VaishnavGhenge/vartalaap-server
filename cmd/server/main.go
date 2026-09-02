@@ -60,6 +60,14 @@ func main() {
 	}()
 
 	hub := signaling.NewHub()
+	// Level-triggered convergence: every client gets the room's full state on a
+	// timer, so one missed sfu-tracks broadcast heals itself instead of
+	// silently costing that peer someone's media for the rest of the call.
+	// 15s is a compromise between how long a client can stay wrong and how
+	// much traffic an idle room generates; rooms with nothing published are
+	// skipped entirely.
+	stopSnapshots := hub.StartSnapshotLoop(15 * time.Second)
+	defer stopSnapshots()
 	instantRooms := roomaccess.NewInstantRegistry()
 	hub.SetRoomEmptyHandler(func(roomID string) {
 		instantRooms.MarkEmpty(roomID, time.Now().UTC())
@@ -73,12 +81,14 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/stats", httpx.NewStatsHandler())
-	mux.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
+	// Operator surfaces. Gated behind OPS_TOKEN and 404 without it — /metrics
+	// is bound to localhost, and these two carry the same class of data.
+	mux.HandleFunc("/stats", httpx.RequireOpsToken(cfg.OpsToken, httpx.NewStatsHandler()))
+	mux.HandleFunc("/dashboard", httpx.RequireOpsToken(cfg.OpsToken, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := dashboardHTML.ReadFile("web/dashboard.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(b)
-	})
+	}))
 	var roomGate httpx.RoomAccessGate
 	callRoomGate := func(ctx context.Context, room string, activate bool) error {
 		if roomGate == nil {
@@ -137,7 +147,7 @@ func main() {
 			AccessTokenTTL: cfg.AccessTokenTTL,
 			SecureCookie:   cfg.SecureCookie,
 		}
-		httpx.SFUHandlers(mux, hub, sfuRegistry, cfCalls, authCfg, callRoomGate)
+		httpx.SFUHandlers(mux, sfuRegistry, cfCalls, authCfg, callRoomGate)
 		log.Println("SFU endpoints enabled")
 	} else {
 		log.Println("WARN: SFU endpoints disabled (missing CF_CALLS_APP_ID or CF_CALLS_APP_TOKEN)")

@@ -61,10 +61,23 @@ var (
 	}, []string{"phase"})
 
 	// CallAttempts counts every attempt to establish a call, labeled by outcome.
-	// Success ratio = success / total — the connection-success SLO (target 99.5%).
+	//
+	// The connection-success SLO (target 99.5%) is
+	//   (success + slow) / (success + slow + failed + error)
+	//
+	// `slow` is in the numerator on purpose: it means media arrived after the
+	// 10s ceiling, which is a working call the user is sitting in. Counting it
+	// as a failure made the SLO disagree with what people experienced, and made
+	// the number get worse when a slow call was rescued rather than better. How
+	// long setup took is the TTFM histogram's question, not this counter's.
+	//
+	// `abandoned` is excluded from both sides: nobody was publishing, so no
+	// media was owed and there was no call to succeed or fail at.
+	//
+	// `timeout` is legacy, retained for historical series.
 	CallAttempts = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vartalaap_call_attempts_total",
-		Help: "Call setup attempts by outcome (success, timeout, error, abandoned).",
+		Help: "Call setup attempts by outcome (success, slow, failed, error, abandoned; timeout is legacy). Success SLO = (success+slow)/(success+slow+failed+error).",
 	}, []string{"result"})
 
 	// CallSetupFailures breaks a timeout (CallAttempts result=timeout) down by
@@ -76,6 +89,44 @@ var (
 		Name: "vartalaap_call_setup_failures_total",
 		Help: "Call setup timeouts by root cause (no_tracks_announced, tracks_announced_not_pulled, pull_errored, peers_present_none_publishing, unknown).",
 	}, []string{"reason"})
+
+	// SfuPublishAccepted and SfuAnnounces are a deliberate pair. Cloudflare
+	// accepting a publish (200 on tracks/new) does NOT mean the track is live:
+	// the publisher's browser still has to apply the answer, and only then does
+	// it announce over sfu-announce. Announcing server-side from the 200 raced
+	// ahead of the publisher and let subscribers pull tracks nobody was sending
+	// (the 2026-09-01 dead-track incident), so the announce is now the
+	// publisher's alone.
+	//
+	// The gap between these two counters is the cost of that correctness:
+	// accepted-but-never-announced means a push that Cloudflare took and the
+	// browser never confirmed. It should be near zero. A persistent gap is a
+	// real client-side publish failure, which is exactly what we want visible
+	// rather than masked by a server-side broadcast.
+	SfuPublishAccepted = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "vartalaap_sfu_publish_accepted_total",
+		Help: "Publishes Cloudflare accepted on tracks/new. Compare with vartalaap_sfu_announces_total: the gap is pushes the publisher never confirmed.",
+	})
+
+	SfuAnnounces = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "vartalaap_sfu_announces_total",
+		Help: "Track-set announcements received from publishers after a CF push ack. The sole trigger for broadcasting sfu-tracks to a room.",
+	})
+
+	// SfuRepairs counts the self-healing ladder. `stage` is publish or
+	// subscribe, `rung` is how far it escalated (1 = retry in place, 2 = rebuild
+	// that direction's CF session), `outcome` is attempted or recovered.
+	//
+	// The pair is what makes it readable. attempted{rung="1"} with a matching
+	// recovered{rung="1"} is the system working: a cheap retry fixed it. A
+	// large attempted count with almost no recovered is a ladder spinning
+	// without healing anything, which is worse than no ladder because it hides
+	// the failure behind activity. Everything landing on rung 2 means the cheap
+	// retry never works and rung 1 should be reconsidered.
+	SfuRepairs = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vartalaap_sfu_repairs_total",
+		Help: "Media repair attempts and recoveries by stage (publish/subscribe), rung (1=retry, 2=rebuild session) and outcome (attempted/recovered).",
+	}, []string{"stage", "rung", "outcome"})
 
 	// ─── Calendar sync (Phase 3) ────────────────────────────────────────────
 	//
@@ -127,6 +178,9 @@ func init() {
 		CallSetupPhase,
 		CallAttempts,
 		CallSetupFailures,
+		SfuPublishAccepted,
+		SfuAnnounces,
+		SfuRepairs,
 		CalendarAPIRequests,
 		CalendarAPIDuration,
 		CalendarBusyDegraded,

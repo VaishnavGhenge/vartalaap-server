@@ -425,8 +425,11 @@ async function poll() {
     sloDot('dot-ttfm-p99', ttfm.p99, hasTtfm, 6,   10);
 
     const attempts = d.call_attempts || {};
-    const totalAttempts = (attempts.success || 0) + (attempts.timeout || 0) +
-                          (attempts.error   || 0) + (attempts.abandoned || 0);
+    // Abandoned is deliberately outside the total: nobody was publishing, so
+    // there was no call to succeed or fail at.
+    const connected     = (attempts.success || 0) + (attempts.slow || 0);
+    const notConnected  = (attempts.failed  || 0) + (attempts.error || 0) + (attempts.timeout || 0);
+    const totalAttempts = connected + notConnected;
     const successEl    = document.getElementById('s-success');
     const successSubEl = document.getElementById('s-success-sub');
     if (totalAttempts === 0) {
@@ -437,10 +440,13 @@ async function poll() {
       const rate = attempts.success_rate_pct || 0;
       successEl.textContent = rate.toFixed(rate >= 99.95 ? 1 : 2) + '%';
       // Show the failure breakdown so a degraded rate has an immediate cause.
-      const fails = (attempts.timeout || 0) + (attempts.error || 0);
-      successSubEl.textContent = fails > 0
-        ? `${attempts.timeout || 0} timeout · ${attempts.error || 0} error`
-        : `${totalAttempts} attempt${totalAttempts === 1 ? '' : 's'}`;
+      const parts = [];
+      if (attempts.slow)   parts.push(`${attempts.slow} slow`);
+      if (attempts.failed) parts.push(`${attempts.failed} failed`);
+      if (attempts.error)  parts.push(`${attempts.error} error`);
+      successSubEl.textContent = parts.length
+        ? parts.join(' · ')
+        : `${totalAttempts} connected`;
       // Success-rate SLO is inverted: HIGHER is better. Pass 100/100-rate to
       // sloDot so its lower-is-better thresholds still work.
       sloDot('dot-success', 100 - rate, true, 0.5, 5);

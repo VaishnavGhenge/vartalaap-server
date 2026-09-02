@@ -4,8 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/vaishnavghenge/vartalaap-server/internal/metrics"
@@ -69,11 +69,25 @@ func (h *Hub) join(c *Client, roomID string) {
 	joinedData, _ := json.Marshal(JoinedData{Peers: existing})
 	c.sendJSON(&Envelope{Type: MsgJoined, Room: roomID, Data: joinedData})
 
-	// Replay each existing peer's published SFU tracks so the new joiner can subscribe.
+	// Replay each existing peer's published SFU tracks so the new joiner can
+	// subscribe. The stored Version is deliberately stripped: it records when
+	// THAT PEER last announced, not where the room is now, and the replay walks
+	// a map in arbitrary order. Sent as-is, a peer whose set was written at v3
+	// arriving after one written at v5 would look stale and be discarded, and
+	// that peer's media would never be pulled. A replay is a bulk state dump,
+	// not an ordered update, so it carries no ordering information.
 	for fromPeerID, trackData := range room.sfuTrackSnapshot() {
+		trackData.Version = 0
 		b, _ := json.Marshal(trackData)
 		c.sendJSON(&Envelope{Type: MsgSfuTracks, Room: roomID, From: fromPeerID, Data: b})
 	}
+
+	// Then the authoritative view, which sets the joiner's version floor. The
+	// replay above stays for its own sake: it is what a client that predates
+	// snapshots needs, so server and client can deploy in either order.
+	snap := room.snapshot()
+	snapBytes, _ := json.Marshal(snap)
+	c.sendJSON(&Envelope{Type: MsgRoomSnapshot, Room: roomID, Data: snapBytes})
 
 	// Knocking guests (NeedsAdmit=true) must not appear in the host's tile grid
 	// until the host explicitly admits them. Defer peer-joined until knockAdmit.
@@ -145,37 +159,77 @@ func (h *Hub) forwardState(from *Client, to string, st PeerStateData) {
 	}
 }
 
-// BroadcastSfuTracks merges the new tracks into the peer's cumulative set, then
-// broadcasts the full merged list to all other peers in the room. Storing the
-// merged set (not just the latest batch) ensures late joiners receive all tracks
-// when the hub replays sfu-tracks during join.
-func (h *Hub) BroadcastSfuTracks(roomID, peerID string, data SfuTracksData) {
-	h.mu.Lock()
-	room := h.rooms[roomID]
-	h.mu.Unlock()
-	if room == nil {
-		return
-	}
-	// tracks/new is plain HTTP and can land while the peer's WebSocket is down
-	// (already removed from the room by leaveAll). Storing tracks for a
-	// non-member would create a zombie entry that gets replayed to every later
-	// joiner under a peerId nobody can attribute. The peer's own sfu-announce
-	// after reconnect restores the tracks under its new identity.
-	if room.get(peerID) == nil {
-		slog.Warn("sfu_tracks_dropped_non_member", "room", roomID, "peer_id", peerID, "session", data.SessionID)
-		return
-	}
-	merged := room.storeSfuTracks(peerID, data)
-	b, _ := json.Marshal(merged)
-	payload, _ := json.Marshal(Envelope{Type: MsgSfuTracks, Room: roomID, From: peerID, Data: b})
-	room.broadcastExcept(peerID, payload)
-}
-
 // AnnounceSfuTracks handles a client's sfu-announce: the authoritative full
 // set of tracks it currently publishes. The stored set is replaced (not
 // merged) and rebroadcast as sfu-tracks. This is the self-healing path — the
 // tracks/new interception fires only once per publish, so after a signaling
 // reconnect wipes the stored set, only the client can restore it.
+// SendSnapshot replies to a client's sync request with its room's full state.
+func (h *Hub) SendSnapshot(c *Client) {
+	h.mu.Lock()
+	room := h.rooms[c.room]
+	h.mu.Unlock()
+	if room == nil {
+		return
+	}
+	snap := room.snapshot()
+	b, _ := json.Marshal(snap)
+	c.sendJSON(&Envelope{Type: MsgRoomSnapshot, Room: room.id, Data: b})
+}
+
+// StartSnapshotLoop pushes a room snapshot to every occupied room on a timer,
+// so a client that missed a broadcast converges without having to notice it
+// missed one. Returns the stop function; the caller owns the goroutine's
+// lifetime.
+//
+// One goroutine for the whole server, not one per room: the rooms are walked
+// on each tick. On a small box a per-room goroutine would be the wrong thing
+// to scale with participant count.
+func (h *Hub) StartSnapshotLoop(interval time.Duration) func() {
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				h.broadcastSnapshots()
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+func (h *Hub) broadcastSnapshots() {
+	h.mu.Lock()
+	rooms := make([]*Room, 0, len(h.rooms))
+	for _, room := range h.rooms {
+		rooms = append(rooms, room)
+	}
+	h.mu.Unlock()
+
+	for _, room := range rooms {
+		if room.empty() {
+			continue
+		}
+		snap := room.snapshot()
+		// A room where nobody publishes anything yet has nothing to converge
+		// on, and the peers list is already maintained by join/leave. Skipping
+		// keeps an idle room silent instead of ticking at every participant.
+		if len(snap.Tracks) == 0 {
+			continue
+		}
+		b, _ := json.Marshal(snap)
+		payload, _ := json.Marshal(Envelope{Type: MsgRoomSnapshot, Room: room.id, Data: b})
+		// Best-effort: a snapshot is a periodic convergence aid, so dropping one
+		// for a peer whose send queue is backed up is correct. Blocking on a
+		// slow client would stall the loop for every other room.
+		room.broadcastAllBestEffort(payload)
+	}
+}
+
 func (h *Hub) AnnounceSfuTracks(c *Client, data SfuTracksData) {
 	h.mu.Lock()
 	room := h.rooms[c.room]
@@ -187,7 +241,10 @@ func (h *Hub) AnnounceSfuTracks(c *Client, data SfuTracksData) {
 	if room.get(c.id) == nil {
 		return
 	}
-	room.setSfuTracks(c.id, data)
+	metrics.SfuAnnounces.Inc()
+	// Stamp the broadcast with the version the write landed at so a client can
+	// order it against snapshots that may arrive out of sequence.
+	data.Version = room.setSfuTracks(c.id, data)
 	b, _ := json.Marshal(data)
 	payload, _ := json.Marshal(Envelope{Type: MsgSfuTracks, Room: c.room, From: c.id, Data: b})
 	room.broadcastExcept(c.id, payload)

@@ -1,61 +1,53 @@
 package signaling
 
-import "sync"
+import (
+	"sort"
+	"sync"
+)
 
 type Room struct {
-	id        string
-	mu        sync.RWMutex
-	members   map[string]*Client
-	sfuTracks map[string]SfuTracksData // peerID → published tracks
+	id      string
+	mu      sync.RWMutex
+	members map[string]*Client
+	// peerID → published tracks. The authoritative view of who is sending
+	// what, written only by the sfu-announce path.
+	sfuTracks map[string]SfuTracksData
+	// Bumped on every mutation of sfuTracks. Snapshots carry it so a client can
+	// discard one that was built before an update it has already applied:
+	// without it, a snapshot in flight when a peer announces would roll that
+	// announcement back and the track would go dark until the next snapshot.
+	version uint64
 }
 
 func newRoom(id string) *Room {
 	return &Room{id: id, members: make(map[string]*Client), sfuTracks: make(map[string]SfuTracksData)}
 }
 
-// storeSfuTracks merges the new tracks into the peer's cumulative set, keyed by
-// trackName. Returns the full merged payload so the caller can broadcast it.
-// This ensures both live peers and late joiners always see all published tracks,
-// not just the last batch (e.g. audio-only first publish, video added later).
-func (r *Room) storeSfuTracks(peerID string, data SfuTracksData) SfuTracksData {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	existing, ok := r.sfuTracks[peerID]
-	if !ok {
-		r.sfuTracks[peerID] = data
-		return data
-	}
-	// Upsert by trackName — new data wins on conflict. SessionID is always updated
-	// because it changes when a peer leaves and rejoins with a new CF session.
-	byName := make(map[string]SfuTrackInfo, len(existing.Tracks)+len(data.Tracks))
-	for _, t := range existing.Tracks {
-		byName[t.TrackName] = t
-	}
-	for _, t := range data.Tracks {
-		byName[t.TrackName] = t
-	}
-	merged := make([]SfuTrackInfo, 0, len(byName))
-	for _, t := range byName {
-		merged = append(merged, t)
-	}
-	result := SfuTracksData{SessionID: data.SessionID, Tracks: merged}
-	r.sfuTracks[peerID] = result
-	return result
-}
-
-// setSfuTracks replaces the peer's stored track set wholesale. Used by the
+// setSfuTracks replaces the peer's stored track set wholesale. This is the
+// only writer: the publisher announces its full current set after each CF push
+// ack, so replace (never merge) is what keeps a track the peer stopped
+// publishing from lingering in the room's view forever. Used by the
 // sfu-announce path, where the client sends its complete current set —
 // replace semantics drop track names left over from a previous CF session,
 // which the merge in storeSfuTracks would keep forever.
-func (r *Room) setSfuTracks(peerID string, data SfuTracksData) {
+// setSfuTracks returns the version the room is at after the write, so the
+// broadcast that follows can carry it and be ordered against snapshots.
+func (r *Room) setSfuTracks(peerID string, data SfuTracksData) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.version++
+	data.Version = r.version
 	r.sfuTracks[peerID] = data
+	return r.version
 }
 
 func (r *Room) removeSfuTracks(peerID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, ok := r.sfuTracks[peerID]; !ok {
+		return
+	}
+	r.version++
 	delete(r.sfuTracks, peerID)
 }
 
@@ -69,6 +61,37 @@ func (r *Room) sfuTrackSnapshot() map[string]SfuTracksData {
 		out[k] = v
 	}
 	return out
+}
+
+// snapshot is the room's complete current state: who is present and what each
+// of them publishes. It is what makes the protocol level-triggered — a client
+// that missed any single broadcast converges from this without needing to know
+// which edge it lost.
+func (r *Room) snapshot() RoomSnapshotData {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	tracks := make([]RoomSnapshotPeerTracks, 0, len(r.sfuTracks))
+	for peerID, data := range r.sfuTracks {
+		// A stored set for someone no longer in the room is stale by
+		// definition. Sending it would have every client subscribe to a
+		// departed peer's tracks and then time them out.
+		if _, ok := r.members[peerID]; !ok {
+			continue
+		}
+		tracks = append(tracks, RoomSnapshotPeerTracks{
+			PeerID:    peerID,
+			SessionID: data.SessionID,
+			Tracks:    data.Tracks,
+		})
+	}
+	// Deterministic order keeps snapshots comparable in logs and tests; the
+	// client does not depend on it.
+	sort.Slice(tracks, func(i, j int) bool { return tracks[i].PeerID < tracks[j].PeerID })
+	return RoomSnapshotData{
+		Version: r.version,
+		Peers:   r.peerInfosLocked(),
+		Tracks:  tracks,
+	}
 }
 
 func (r *Room) add(c *Client) {
@@ -117,6 +140,11 @@ func (r *Room) empty() bool {
 func (r *Room) peerInfos() []PeerInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.peerInfosLocked()
+}
+
+// Must be called with r.mu held (read or write).
+func (r *Room) peerInfosLocked() []PeerInfo {
 	infos := make([]PeerInfo, 0, len(r.members))
 	for _, c := range r.members {
 		c.mu.RLock()
@@ -152,6 +180,17 @@ func (r *Room) broadcastExceptIDs(exceptIDs map[string]bool, payload []byte) {
 
 func (r *Room) broadcastExceptBestEffort(exceptID string, payload []byte) {
 	clients := r.clientsExcept(exceptID)
+	for _, c := range clients {
+		c.enqueueBestEffort(payload)
+	}
+}
+
+// broadcastAllBestEffort sends to every member, including the peer a message
+// is about. Snapshots go to everyone: a publisher needs to see the room's view
+// of its own tracks to notice when the server's copy has drifted from what it
+// believes it is sending.
+func (r *Room) broadcastAllBestEffort(payload []byte) {
+	clients := r.clientsExceptIDs(nil)
 	for _, c := range clients {
 		c.enqueueBestEffort(payload)
 	}
