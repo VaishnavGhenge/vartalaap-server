@@ -78,6 +78,11 @@ func main() {
 	iceLimiter := httpx.NewRateLimiter(60, 120)
 
 	mux := http.NewServeMux()
+	// Keep the loopback listener for local Prometheus, and expose the same
+	// registry through the public API host only behind the operator token. This
+	// lets a staging Grafana/Prometheus scrape Railway without making metrics
+	// public or requiring a second externally-routable service.
+	mux.HandleFunc("/metrics", httpx.RequireOpsToken(cfg.OpsToken, promhttp.Handler().ServeHTTP))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})

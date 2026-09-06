@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// RequireOpsToken gates the operator surfaces (/dashboard, /stats) behind a
+// RequireOpsToken gates the operator surfaces (/dashboard, /stats, /metrics) behind a
 // shared secret from OPS_TOKEN.
 //
 // These two routes sat on the public mux with no gate at all: anyone who

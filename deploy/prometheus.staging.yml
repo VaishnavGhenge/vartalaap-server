@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: vartalaap-staging-api
+    scheme: https
+    metrics_path: /metrics
+    static_configs:
+      - targets: [sessionly-api-staging.up.railway.app]
+    authorization:
+      type: Bearer
+      # Mount a root-readable secret file; do not put the token in this YAML.
+      credentials_file: /run/secrets/vartalaap-ops-token
