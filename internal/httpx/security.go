@@ -1,9 +1,11 @@
 package httpx
 
 import (
+	"math"
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +45,14 @@ func NewRateLimiter(perMinute, burst int) *RateLimiter {
 }
 
 func (l *RateLimiter) Allow(key string) bool {
+	allowed, _ := l.AllowWithRetry(key)
+	return allowed
+}
+
+// AllowWithRetry is Allow plus how long the caller must wait for the bucket to
+// hold a whole token again. A rejected client that is told nothing retries on
+// its own schedule, which is how a repair loop keeps an emptied bucket empty.
+func (l *RateLimiter) AllowWithRetry(key string) (bool, time.Duration) {
 	now := time.Now()
 
 	l.mu.Lock()
@@ -51,7 +61,7 @@ func (l *RateLimiter) Allow(key string) bool {
 	b, ok := l.buckets[key]
 	if !ok {
 		l.buckets[key] = &rateBucket{tokens: l.burst - 1, seen: now}
-		return true
+		return true, 0
 	}
 
 	elapsed := now.Sub(b.seen).Seconds()
@@ -59,7 +69,7 @@ func (l *RateLimiter) Allow(key string) bool {
 	b.seen = now
 
 	if b.tokens < 1 {
-		return false
+		return false, time.Duration((1-b.tokens)/l.rate*float64(time.Second)) + time.Second
 	}
 	b.tokens--
 
@@ -69,7 +79,19 @@ func (l *RateLimiter) Allow(key string) bool {
 		}
 	}
 
-	return true
+	return true, 0
+}
+
+// writeRateLimited answers a throttled request. Retry-After is what turns a
+// rejection into backpressure the client can obey instead of a failure it
+// retries into.
+func writeRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int(math.Ceil(retryAfter.Seconds()))
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 }
 
 func enforceAPIRequest(w http.ResponseWriter, r *http.Request, allowedOrigins []string, methods string, limiter *RateLimiter, extraHeaders ...string) bool {
@@ -94,9 +116,11 @@ func enforceAPIRequestWithLimit(w http.ResponseWriter, r *http.Request, allowedO
 		return false
 	}
 
-	if limiter != nil && !limiter.Allow(r.URL.Path+"|"+clientIP(r)) {
-		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
-		return false
+	if limiter != nil {
+		if allowed, retryAfter := limiter.AllowWithRetry(r.URL.Path + "|" + clientIP(r)); !allowed {
+			writeRateLimited(w, retryAfter)
+			return false
+		}
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)

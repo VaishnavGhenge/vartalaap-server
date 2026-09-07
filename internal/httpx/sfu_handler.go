@@ -21,7 +21,21 @@ import (
 // query params on /sfu/sessions/new so partytracks doesn't need to know
 // about our room model.
 func SFUHandlers(mux *http.ServeMux, registry *sfu.Registry, cf *cfrealtime.Client, cfg AuthConfig, gates ...RoomAccessGate) {
-	lim := NewRateLimiter(60, 120)
+	// /sfu/sessions/new is the only route in this prefix that every participant
+	// shares: the others carry the CF session id in the path, so they bucket
+	// per session for free. Limiting it per address alone conflated two very
+	// different callers. A ten-person room legitimately creates ~100 sessions
+	// from one address during the join (each browser opens one publish session
+	// plus one subscribe session per remote publisher), which a 60/min bucket
+	// cannot absorb, while a single client whose repair ladder is rebuilding
+	// its session on a loop can drain the whole room's budget and then keep the
+	// bucket empty — the state that ended the 2026-09-07 staging call.
+	//
+	// So: a tight per-peer bucket catches the runaway client, and a wide
+	// per-address bucket stays as the abuse backstop with room for a real group
+	// behind one NAT.
+	peerLim := NewRateLimiter(30, 40)
+	addrLim := NewRateLimiter(300, 400)
 	var gate RoomAccessGate
 	if len(gates) > 0 {
 		gate = gates[0]
@@ -30,8 +44,13 @@ func SFUHandlers(mux *http.ServeMux, registry *sfu.Registry, cf *cfrealtime.Clie
 	wrap := func(method string, h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			// SFU bodies (SDP offers/answers) are much larger than other
-			// endpoints' JSON; use the SFU-specific body cap.
-			if !enforceAPIRequestWithLimit(w, r, cfg.AllowedOrigins, method, lim, maxSFURequestBytes) {
+			// endpoints' JSON; use the SFU-specific body cap. Rate limiting is
+			// handled below so it can key on the peer, which the shared helper
+			// knows nothing about.
+			if !enforceAPIRequestWithLimit(w, r, cfg.AllowedOrigins, method, nil, maxSFURequestBytes) {
+				return
+			}
+			if !allowSFURequest(w, r, peerLim, addrLim) {
 				return
 			}
 			RequireRoomMember(cfg.JWTSecret, h)(w, r)
@@ -39,6 +58,25 @@ func SFUHandlers(mux *http.ServeMux, registry *sfu.Registry, cf *cfrealtime.Clie
 	}
 
 	mux.HandleFunc("/sfu/sessions/", wrap("POST, PUT, DELETE", handleSFUSessionRoute(registry, cf, gate)))
+}
+
+// allowSFURequest throttles the SFU proxy on two keys. partytracks appends
+// peerId to every request it makes (apiExtraParams), so the per-peer bucket
+// covers the whole prefix; requests without one fall back to the address
+// bucket alone rather than being rejected, since the route's JWT check is what
+// actually authorizes them.
+func allowSFURequest(w http.ResponseWriter, r *http.Request, peerLim, addrLim *RateLimiter) bool {
+	if peerID := r.URL.Query().Get("peerId"); peerID != "" {
+		if allowed, retryAfter := peerLim.AllowWithRetry(r.URL.Path + "|peer|" + peerID); !allowed {
+			writeRateLimited(w, retryAfter)
+			return false
+		}
+	}
+	if allowed, retryAfter := addrLim.AllowWithRetry(r.URL.Path + "|addr|" + clientIP(r)); !allowed {
+		writeRateLimited(w, retryAfter)
+		return false
+	}
+	return true
 }
 
 func handleSFUCreateSession(registry *sfu.Registry, cf *cfrealtime.Client, gate RoomAccessGate) http.HandlerFunc {

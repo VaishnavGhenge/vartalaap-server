@@ -180,27 +180,29 @@ func handleRefresh(st store.Storer, cfg AuthConfig) http.HandlerFunc {
 
 		hash := auth.HashRefreshToken(cookie.Value)
 		rt, err := st.GetRefreshToken(r.Context(), hash)
-		if err != nil || time.Now().After(rt.ExpiresAt) {
-			clearRefreshCookie(w, cfg.SecureCookie)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.Error("refresh: lookup", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-
-		// Rotate: delete old before issuing new (prevents replay).
-		if err := st.DeleteRefreshToken(r.Context(), hash); err != nil {
-			slog.Error("refresh: delete", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+		if errors.Is(err, store.ErrNotFound) || time.Now().After(rt.ExpiresAt) {
+			// A concurrent refresh may have already replaced this cookie. A
+			// rejected request must never delete the winner's fresh cookie.
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
 		u, err := st.GetUserByID(r.Context(), rt.UserID)
 		if err != nil {
-			clearRefreshCookie(w, cfg.SecureCookie)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			if errors.Is(err, store.ErrNotFound) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			} else {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+			}
 			return
 		}
 
-		writeTokens(w, r, st, cfg, u)
+		writeTokens(w, r, st, cfg, u, hash)
 	}
 }
 
@@ -280,7 +282,7 @@ func handleUpdateMe(st store.Storer) http.HandlerFunc {
 	}
 }
 
-func writeTokens(w http.ResponseWriter, r *http.Request, st store.Storer, cfg AuthConfig, u *store.User) {
+func writeTokens(w http.ResponseWriter, r *http.Request, st store.Storer, cfg AuthConfig, u *store.User, oldHash ...string) {
 	accessToken, err := auth.SignAccessToken(u.ID, cfg.JWTSecret, cfg.AccessTokenTTL)
 	if err != nil {
 		slog.Error("auth: sign access token", "err", err)
@@ -295,7 +297,16 @@ func writeTokens(w http.ResponseWriter, r *http.Request, st store.Storer, cfg Au
 		return
 	}
 
-	if err := st.CreateRefreshToken(r.Context(), u.ID, hashRT, time.Now().Add(refreshTokenTTL)); err != nil {
+	if len(oldHash) > 0 {
+		err = st.RotateRefreshToken(r.Context(), oldHash[0], hashRT, time.Now().Add(refreshTokenTTL))
+	} else {
+		err = st.CreateRefreshToken(r.Context(), u.ID, hashRT, time.Now().Add(refreshTokenTTL))
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
 		slog.Error("auth: store refresh token", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

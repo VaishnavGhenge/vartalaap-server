@@ -26,6 +26,7 @@ type Storer interface {
 	CreateRefreshToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
 	GetRefreshToken(ctx context.Context, tokenHash string) (*RefreshToken, error)
 	DeleteRefreshToken(ctx context.Context, tokenHash string) error
+	RotateRefreshToken(ctx context.Context, oldHash, newHash string, expiresAt time.Time) error
 
 	// Phase 2 — scheduling
 	ListAvailability(ctx context.Context, hostID string) ([]AvailabilityRule, error)
@@ -305,6 +306,21 @@ func (s *Store) DeleteRefreshToken(ctx context.Context, tokenHash string) error 
 	)
 	if err != nil {
 		return fmt.Errorf("store: delete refresh token: %w", err)
+	}
+	return nil
+}
+
+// Atomic compare-and-replace: concurrent requests cannot both consume the
+// same token, and a database failure leaves the original token usable.
+func (s *Store) RotateRefreshToken(ctx context.Context, oldHash, newHash string, expiresAt time.Time) error {
+	result, err := s.pool.Exec(ctx,
+		`UPDATE refresh_tokens SET token_hash = $2, expires_at = $3
+		 WHERE token_hash = $1 AND expires_at > now()`, oldHash, newHash, expiresAt)
+	if err != nil {
+		return fmt.Errorf("store: rotate refresh token: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

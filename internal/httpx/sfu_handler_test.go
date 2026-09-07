@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -503,5 +504,77 @@ func TestSFUClose_NotFound(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+// ─── Tests: session-creation rate limiting ────────────────────────────────────
+
+// A group behind one NAT shares an address. Every participant opens one
+// publish session plus one subscribe session per remote publisher, so a single
+// address legitimately creates dozens of sessions during a join. One busy peer
+// must not spend that budget for everyone else.
+func TestSFUCreateSession_PerPeerBudgetIsolated(t *testing.T) {
+	cf := newFakeCFServer("cf-session-abc", cfrealtime.TracksNewResponse{})
+	defer cf.close()
+
+	registry := makeTestRegistry()
+	mux := http.NewServeMux()
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
+	token := makeSFUAuthToken("user-1")
+
+	create := func(peerID string) int {
+		req := sfuRequest(http.MethodPost, "/sfu/sessions/new?roomId=room-1&peerId="+peerID+"&kind=publish", nil, token)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// Drive one peer past its own bucket.
+	throttled := false
+	for i := 0; i < 60 && !throttled; i++ {
+		throttled = create("peer-loop") == http.StatusTooManyRequests
+	}
+	if !throttled {
+		t.Fatal("expected a peer looping session creation to be throttled")
+	}
+
+	// Every other participant on that address must still be able to join.
+	for _, peerID := range []string{"peer-bob", "peer-carol", "peer-dave"} {
+		if code := create(peerID); code != http.StatusOK {
+			t.Errorf("peer %s sharing the address got %d, want 200", peerID, code)
+		}
+	}
+}
+
+// A rejection with no Retry-After is a failure the client retries into. The
+// header is what lets it back off instead.
+func TestSFUCreateSession_ThrottleCarriesRetryAfter(t *testing.T) {
+	cf := newFakeCFServer("cf-session-abc", cfrealtime.TracksNewResponse{})
+	defer cf.close()
+
+	registry := makeTestRegistry()
+	mux := http.NewServeMux()
+	SFUHandlers(mux, registry, cf.client(), authCfgSFU())
+	token := makeSFUAuthToken("user-1")
+
+	var rec *httptest.ResponseRecorder
+	for i := 0; i < 60; i++ {
+		req := sfuRequest(http.MethodPost, "/sfu/sessions/new?roomId=room-1&peerId=peer-loop&kind=publish", nil, token)
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code == http.StatusTooManyRequests {
+			break
+		}
+	}
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after a burst of creations, got %d", rec.Code)
+	}
+	retryAfter := rec.Header().Get("Retry-After")
+	if retryAfter == "" {
+		t.Fatal("429 must carry Retry-After so the client can back off")
+	}
+	seconds, err := strconv.Atoi(retryAfter)
+	if err != nil || seconds < 1 {
+		t.Fatalf("Retry-After must be a positive whole number of seconds, got %q", retryAfter)
 	}
 }

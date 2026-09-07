@@ -3,6 +3,7 @@ package httpx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -171,6 +172,21 @@ func (m *memStore) DeleteRefreshToken(_ context.Context, tokenHash string) error
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.tokens, tokenHash)
+	return nil
+}
+
+func (m *memStore) RotateRefreshToken(_ context.Context, oldHash, newHash string, expiresAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rt, ok := m.tokens[oldHash]
+	if !ok || time.Now().After(rt.ExpiresAt) {
+		return store.ErrNotFound
+	}
+	delete(m.tokens, oldHash)
+	next := *rt
+	next.TokenHash = newHash
+	next.ExpiresAt = expiresAt
+	m.tokens[newHash] = &next
 	return nil
 }
 
@@ -864,6 +880,56 @@ func TestRefreshRotatesToken(t *testing.T) {
 	h(rec2, authReq(http.MethodPost, "/", "", rt1))
 	if rec2.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for reused token, got %d", rec2.Code)
+	}
+	if len(rec2.Result().Cookies()) != 0 {
+		t.Fatal("a rejected rotation must not clear the winning request's cookies")
+	}
+}
+
+func TestConcurrentRefreshHasOneWinner(t *testing.T) {
+	st := newMemStore()
+	rt := registerUser(t, st, "race@example.com", "password123")
+	h := handleRefresh(st, testCfg())
+	results := make(chan *httptest.ResponseRecorder, 8)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			h(rec, authReq(http.MethodPost, "/", "", rt))
+			results <- rec
+		}()
+	}
+	wg.Wait()
+	close(results)
+	winners := 0
+	for rec := range results {
+		if rec.Code == http.StatusOK {
+			winners++
+			continue
+		}
+		if rec.Code != http.StatusUnauthorized || len(rec.Result().Cookies()) != 0 {
+			t.Fatalf("loser must reject without changing cookies: %d %v", rec.Code, rec.Result().Cookies())
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("expected one atomic rotation, got %d", winners)
+	}
+}
+
+type failingRefreshStore struct{ store.Storer }
+
+func (s failingRefreshStore) GetRefreshToken(context.Context, string) (*store.RefreshToken, error) {
+	return nil, errors.New("database temporarily unavailable")
+}
+
+func TestRefreshDatabaseFailureIsNotUnauthorized(t *testing.T) {
+	rec := httptest.NewRecorder()
+	handleRefresh(failingRefreshStore{newMemStore()}, testCfg())(rec,
+		authReq(http.MethodPost, "/", "", &http.Cookie{Name: refreshCookieName, Value: "token"}))
+	if rec.Code != http.StatusInternalServerError || len(rec.Result().Cookies()) != 0 {
+		t.Fatalf("database failure must preserve cookies: %d %v", rec.Code, rec.Result().Cookies())
 	}
 }
 
