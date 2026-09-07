@@ -1,0 +1,37 @@
+groups:
+  - name: vartalaap
+    rules:
+      - alert: VartalaapScrapeDown
+        expr: up{job="vartalaap-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: API metrics cannot be scraped
+          description: Check API deployment, private DNS, port, and OPS_TOKEN. This may be a monitoring authentication failure, not an API outage.
+      - alert: VartalaapCallSetupFailures
+        expr: sum by (environment) (increase(vartalaap_call_attempts_total{result=~"failed|error"}[15m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: A call failed to establish media in the last 15 minutes
+      - alert: VartalaapSlowFirstMedia
+        expr: histogram_quantile(0.95, sum by (environment, le) (rate(vartalaap_time_to_first_media_seconds_bucket[15m]))) > 3 and on(environment) sum by (environment) (increase(vartalaap_time_to_first_media_seconds_count[15m])) >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: First media p95 exceeds 3 seconds with at least 5 samples
+      - alert: VartalaapHighRTT
+        expr: histogram_quantile(0.99, sum by (environment, le) (rate(vartalaap_media_rtt_seconds_bucket[5m]))) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Browser RTT sample p99 exceeds 500 ms
+      - alert: VartalaapAPIErrors
+        expr: sum by (environment) (increase(vartalaap_http_request_duration_seconds_count{status_class="5xx"}[5m])) >= 3
+        labels:
+          severity: warning
+        annotations:
+          summary: At least three API server errors in five minutes

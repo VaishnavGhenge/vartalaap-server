@@ -175,8 +175,8 @@ func (c *Client) handle(env *Envelope) {
 		c.hub.SendSnapshot(c)
 	case MsgStatsReport:
 		var rd StatsReportData
-		if len(env.Data) > 0 {
-			_ = json.Unmarshal(env.Data, &rd)
+		if err := json.Unmarshal(env.Data, &rd); err != nil {
+			return
 		}
 		c.mu.RLock()
 		name := c.name
@@ -188,6 +188,7 @@ func (c *Client) handle(env *Envelope) {
 			"peer_name", name,
 		}
 		for _, p := range rd.Peers {
+			metrics.ObserveMedia(p.RoundTripTimeMs, p.PacketLossPercent, p.JitterMs, p.VideoHeld)
 			quality.Default.Set(quality.PeerReport{
 				PeerID:              c.id,
 				Room:                room,

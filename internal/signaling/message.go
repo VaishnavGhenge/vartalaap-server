@@ -135,8 +135,8 @@ type StatsReportPeer struct {
 	NetworkPressure     string  `json:"networkPressure"`
 	RoundTripTimeMs     float64 `json:"roundTripTimeMs"`
 	PacketLossPercent   float64 `json:"packetLossPercent"`
-	OutboundBitrateKbps int     `json:"outboundBitrateKbps"`
-	InboundBitrateKbps  int     `json:"inboundBitrateKbps"`
+	OutboundBitrateKbps float64 `json:"outboundBitrateKbps"`
+	InboundBitrateKbps  float64 `json:"inboundBitrateKbps"`
 	CandidateType       string  `json:"candidateType"`
 	JitterMs            float64 `json:"jitterMs"`
 	EncodingLevel       int     `json:"encodingLevel"`
