@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -23,6 +25,7 @@ import (
 	"github.com/vaishnavghenge/vartalaap-server/internal/gcal"
 	"github.com/vaishnavghenge/vartalaap-server/internal/httpx"
 	_ "github.com/vaishnavghenge/vartalaap-server/internal/metrics"
+	"github.com/vaishnavghenge/vartalaap-server/internal/notifications"
 	"github.com/vaishnavghenge/vartalaap-server/internal/roomaccess"
 	"github.com/vaishnavghenge/vartalaap-server/internal/secretbox"
 	"github.com/vaishnavghenge/vartalaap-server/internal/sfu"
@@ -34,6 +37,8 @@ import (
 var dashboardHTML embed.FS
 
 func main() {
+	appCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
 	cfg := config.Load()
@@ -198,8 +203,9 @@ func main() {
 		}
 
 		bookingDeps := httpx.BookingDeps{
-			Mailer:       mailer,
-			PublicAppURL: cfg.PublicAppURL,
+			DurableNotifications: true,
+			Mailer:               mailer,
+			PublicAppURL:         cfg.PublicAppURL,
 			RoomWindow: httpx.BookingRoomWindow{
 				OpenBefore: cfg.BookingRoomOpenBefore,
 				CloseAfter: cfg.BookingRoomCloseAfter,
@@ -212,6 +218,14 @@ func main() {
 			bookingDeps.Busy = calSvc
 			bookingDeps.CalendarSync = calSvc
 		}
+		worker := &notifications.Worker{Queue: st, Mailer: mailer, PublicAppURL: cfg.PublicAppURL}
+		if calSvc != nil {
+			worker.Calendar = calSvc
+		}
+		workerCtx, stopWorker := context.WithCancel(appCtx)
+		workerDone := make(chan struct{})
+		go func() { defer close(workerDone); worker.Run(workerCtx) }()
+		defer func() { stopWorker(); <-workerDone }()
 		getBookingStatus = func(ctx context.Context, room string) (httpx.RoomStatusResult, bool) {
 			b, err := st.GetBookingByMeetCode(ctx, room)
 			if err != nil {
@@ -305,5 +319,19 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Printf("vartalaap-server listening on :%s", cfg.Port)
-	log.Fatal(srv.ListenAndServe())
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- srv.ListenAndServe() }()
+	select {
+	case err := <-serverDone:
+		if !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("http server stopped", "err", err)
+		}
+	case <-appCtx.Done():
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			_ = srv.Close()
+		}
+		<-serverDone
+	}
 }

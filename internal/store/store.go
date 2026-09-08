@@ -13,6 +13,7 @@ import (
 
 var ErrNotFound = errors.New("not found")
 var ErrConflict = errors.New("conflict")
+var ErrSlotTaken = errors.New("slot taken")
 
 // Storer is the interface the auth and scheduling handlers depend on.
 // *Store satisfies it; tests can provide an in-memory double.
@@ -45,6 +46,7 @@ type Storer interface {
 	GetBookingByMeetCode(ctx context.Context, meetCode string) (*Booking, error)
 	ListBookingsForHost(ctx context.Context, hostID string, fromUTC time.Time, limit int) ([]Booking, error)
 	ListBookingsForEventInRange(ctx context.Context, eventTypeID string, fromUTC, toUTC time.Time) ([]Booking, error)
+	ListBookingsForHostInRange(ctx context.Context, hostID string, fromUTC, toUTC time.Time) ([]Booking, error)
 	CancelBooking(ctx context.Context, id, reason, cancelledBy string) error
 	CountBookingsInMonth(ctx context.Context, hostID string, year int, month time.Month) (int, error)
 
@@ -111,6 +113,9 @@ type EventType struct {
 // guests to sign up before booking. Status transitions are linear:
 // pending_payment → confirmed → completed | cancelled.
 type Booking struct {
+	// Populated for scheduling conflict checks, not persisted on the booking.
+	BufferBeforeMin    *int
+	BufferAfterMin     *int
 	ID                 string
 	EventTypeID        string
 	HostID             string
@@ -600,11 +605,37 @@ func scanBooking(row pgx.Row, b *Booking) error {
 // MeetCode (uniqueness re-tried on conflict at the handler layer is cleaner
 // than a retry loop here — the handler owns the generation strategy).
 func (s *Store) CreateBooking(ctx context.Context, b Booking) (*Booking, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, fmt.Errorf("store: begin booking: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	// Every booking writer locks the host before checking overlaps. The next
+	// statement sees the preceding writer's commit under READ COMMITTED.
+	if _, err := tx.Exec(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, b.HostID); err != nil {
+		return nil, fmt.Errorf("store: lock booking host: %w", err)
+	}
+	var occupied bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM bookings b JOIN event_types old ON old.id=b.event_type_id
+		JOIN event_types wanted ON wanted.id=$2
+		WHERE b.host_id=$1 AND b.status <> 'cancelled'
+		AND b.starts_at - old.buffer_before_min * interval '1 minute' < $4::timestamptz + wanted.buffer_min * interval '1 minute'
+		AND b.ends_at + old.buffer_min * interval '1 minute' > $3::timestamptz - wanted.buffer_before_min * interval '1 minute'
+	)`, b.HostID, b.EventTypeID, b.StartsAt, b.EndsAt).Scan(&occupied)
+	if err != nil {
+		return nil, fmt.Errorf("store: check booking overlap: %w", err)
+	}
+	if occupied && b.Status != "cancelled" {
+		return nil, ErrSlotTaken
+	}
 	out := &Booking{}
 	// CancelToken: caller passes one when it cares about determinism (tests);
 	// otherwise the column default (random uuid hex) fills in. The NULLIF
 	// pattern lets us keep one INSERT path for both cases.
-	err := scanBooking(s.pool.QueryRow(ctx,
+	err = scanBooking(tx.QueryRow(ctx,
 		`INSERT INTO bookings
 		   (event_type_id, host_id, guest_email, guest_name,
 		    starts_at, ends_at, meet_code, status, stripe_session_id,
@@ -622,6 +653,14 @@ func (s *Store) CreateBooking(ctx context.Context, b Booking) (*Booking, error) 
 			return nil, ErrConflict
 		}
 		return nil, fmt.Errorf("store: create booking: %w", err)
+	}
+	if out.Status == "confirmed" {
+		if err := enqueueBookingNotifications(ctx, tx, *out, "created"); err != nil {
+			return nil, fmt.Errorf("store: enqueue booking: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("store: commit booking: %w", err)
 	}
 	return out, nil
 }
@@ -702,12 +741,41 @@ func (s *Store) ListBookingsForHost(ctx context.Context, hostID string, fromUTC 
 // standard half-open-interval overlap and matches the bookings_event_starts_idx
 // access pattern.
 func (s *Store) ListBookingsForEventInRange(ctx context.Context, eventTypeID string, fromUTC, toUTC time.Time) ([]Booking, error) {
+	return s.listBookingsInRange(ctx, "event_type_id", eventTypeID, fromUTC, toUTC)
+}
+
+func (s *Store) ListBookingsForHostInRange(ctx context.Context, hostID string, fromUTC, toUTC time.Time) ([]Booking, error) {
+	events, err := s.ListEventTypes(ctx, hostID, false)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]EventType, len(events))
+	var maxBefore, maxAfter int
+	for _, e := range events {
+		byID[e.ID] = e
+		maxBefore = max(maxBefore, e.BufferBeforeMin)
+		maxAfter = max(maxAfter, e.BufferMin)
+	}
+	bookings, err := s.listBookingsInRange(ctx, "host_id", hostID,
+		fromUTC.Add(-time.Duration(maxAfter)*time.Minute), toUTC.Add(time.Duration(maxBefore)*time.Minute))
+	if err != nil {
+		return nil, err
+	}
+	for i := range bookings {
+		e := byID[bookings[i].EventTypeID]
+		bookings[i].BufferBeforeMin = &e.BufferBeforeMin
+		bookings[i].BufferAfterMin = &e.BufferMin
+	}
+	return bookings, nil
+}
+
+func (s *Store) listBookingsInRange(ctx context.Context, column, id string, fromUTC, toUTC time.Time) ([]Booking, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+bookingCols+` FROM bookings
-		 WHERE event_type_id = $1 AND status <> 'cancelled'
+		 WHERE `+column+` = $1 AND status <> 'cancelled'
 		   AND starts_at < $3 AND ends_at > $2
 		 ORDER BY starts_at ASC`,
-		eventTypeID, fromUTC, toUTC,
+		id, fromUTC, toUTC,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: list bookings in range: %w", err)
@@ -732,21 +800,32 @@ func (s *Store) ListBookingsForEventInRange(ctx context.Context, eventTypeID str
 // trail survives — a paid booking that gets refunded later still needs the
 // original record. ErrNotFound if the ID doesn't exist or is already cancelled.
 func (s *Store) CancelBooking(ctx context.Context, id, reason, cancelledBy string) error {
-	tag, err := s.pool.Exec(ctx,
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var b Booking
+	err = scanBooking(tx.QueryRow(ctx,
 		`UPDATE bookings
 		    SET status = 'cancelled',
 		        cancellation_reason = $2,
 		        cancelled_by = $3
-		 WHERE id = $1 AND status <> 'cancelled'`,
+		 WHERE id = $1 AND status <> 'cancelled' RETURNING `+bookingCols,
 		id, reason, cancelledBy,
-	)
+	), &b)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("store: cancel booking: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	if err := enqueueBookingNotifications(ctx, tx, b, "cancelled"); err != nil {
+		return fmt.Errorf("store: enqueue cancellation: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // CountBookingsInMonth powers the free-plan 10-bookings/month limit. Counts

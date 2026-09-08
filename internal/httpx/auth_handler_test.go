@@ -423,6 +423,18 @@ func (m *memStore) ListBookingsForEventInRange(_ context.Context, eventTypeID st
 	return out, nil
 }
 
+func (m *memStore) ListBookingsForHostInRange(_ context.Context, hostID string, fromUTC, toUTC time.Time) ([]store.Booking, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]store.Booking, 0)
+	for _, b := range m.bookings {
+		if b.HostID == hostID && b.Status != "cancelled" && b.StartsAt.Before(toUTC) && b.EndsAt.After(fromUTC) {
+			out = append(out, *b)
+		}
+	}
+	return out, nil
+}
+
 func (m *memStore) CancelBooking(_ context.Context, id, reason, cancelledBy string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

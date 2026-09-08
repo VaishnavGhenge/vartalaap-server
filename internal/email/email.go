@@ -1,18 +1,14 @@
 // Package email handles transactional emails for booking notifications.
 //
-// Design constraints (1GB DigitalOcean droplet, see CLAUDE.md):
-//   - No buffered in-memory queues; sends are synchronous from the caller.
-//   - Every Send has a context deadline so a stuck SMTP server can't pin the
-//     booking handler indefinitely.
-//   - When SMTP is not configured the Mailer falls back to LogMailer so dev
-//     environments never fail to create a booking just because email isn't
-//     set up.
+// Booking sends run from the PostgreSQL outbox worker. Each provider call
+// respects a deadline; log-only development mail is not counted as delivered.
 package email
 
 import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,12 +33,27 @@ type Mailer interface {
 // type so the ICS calendar invite is just one more entry rather than a
 // special-case in the renderer.
 type Message struct {
-	To          []string
-	From        string
-	Subject     string
-	HTMLBody    string
-	TextBody    string
-	Attachments []Attachment
+	IdempotencyKey string
+	To             []string
+	From           string
+	Subject        string
+	HTMLBody       string
+	TextBody       string
+	Attachments    []Attachment
+}
+
+// Prepare fixes the configured sender before the outbox snapshots the message.
+// A later config change must not change the payload for an idempotency key.
+func Prepare(m Mailer, msg Message) Message {
+	if msg.From == "" {
+		switch sender := m.(type) {
+		case *ResendMailer:
+			msg.From = sender.from
+		case *SMTPMailer:
+			msg.From = sender.cfg.From
+		}
+	}
+	return msg
 }
 
 type Attachment struct {
@@ -131,6 +142,13 @@ func (m *ResendMailer) Send(ctx context.Context, msg Message) error {
 		"text":    msg.TextBody,
 		"html":    msg.HTMLBody,
 	}
+	if len(msg.Attachments) > 0 {
+		attachments := make([]map[string]string, 0, len(msg.Attachments))
+		for _, a := range msg.Attachments {
+			attachments = append(attachments, map[string]string{"filename": a.Filename, "content": base64.StdEncoding.EncodeToString(a.Body), "content_type": a.ContentType})
+		}
+		body["attachments"] = attachments
+	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("resend: marshal: %w", err)
@@ -141,6 +159,9 @@ func (m *ResendMailer) Send(ctx context.Context, msg Message) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+m.apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	if msg.IdempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", msg.IdempotencyKey)
+	}
 
 	resp, err := m.client.Do(req)
 	if err != nil {

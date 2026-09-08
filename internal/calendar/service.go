@@ -362,19 +362,17 @@ func (s *Service) BusyPeriods(ctx context.Context, hostID string, fromUTC, toUTC
 // ─── Writes ──────────────────────────────────────────────────────────────────
 
 // SyncBookingCreated mirrors a confirmed booking into the host's calendar.
-// Never returns an error: the booking exists regardless, and a guest who has
-// finished booking should not see a failure because Google timed out. Failures
-// are logged, counted, and recorded on the connection so the dashboard can say
-// "calendar sync is failing" instead of quietly drifting.
-func (s *Service) SyncBookingCreated(ctx context.Context, in BookingEvent) {
-	conn, ok := s.connectionFor(ctx, in.HostID, "create")
-	if !ok {
-		return
+// Failures are returned to the durable worker and recorded on the connection.
+// They do not roll back the already-committed booking.
+func (s *Service) SyncBookingCreated(ctx context.Context, in BookingEvent) error {
+	conn, err := s.connectionFor(ctx, in.HostID, "create")
+	if err != nil || conn == nil {
+		return err
 	}
 	token, err := s.accessToken(ctx, conn)
 	if err != nil {
 		s.recordWriteFailure(ctx, conn, "create", in.BookingID, err)
-		return
+		return err
 	}
 	eventID, err := timedCall(ctx, "events.insert", func(ctx context.Context) (string, error) {
 		return s.client.InsertEvent(ctx, token, conn.CalendarID, gcal.Event{
@@ -391,7 +389,7 @@ func (s *Service) SyncBookingCreated(ctx context.Context, in BookingEvent) {
 	})
 	if err != nil {
 		s.recordWriteFailure(ctx, conn, "create", in.BookingID, err)
-		return
+		return err
 	}
 	if err := s.store.CreateBookingCalendarEvent(ctx, store.BookingCalendarEvent{
 		BookingID:  in.BookingID,
@@ -399,37 +397,37 @@ func (s *Service) SyncBookingCreated(ctx context.Context, in BookingEvent) {
 		EventID:    eventID,
 		CalendarID: conn.CalendarID,
 	}); err != nil {
-		// The remote event exists but we lost the mapping. Cancellation will
-		// not find it — log loudly, because this is the one write failure that
-		// leaves a stale event in a host's calendar. The deterministic event ID
-		// (gcal.EventID) makes it recoverable by hand.
+		// Retrying the deterministic insert repairs this mapping without
+		// creating another Google event.
 		slog.Error("calendar: event created but mapping not saved",
 			"err", err, "booking_id", in.BookingID, "event_id", eventID)
 		metrics.CalendarWritebackFailures.WithLabelValues("create").Inc()
-		return
+		return err
 	}
 	_ = s.store.RecordCalendarSync(ctx, conn.ID, nil)
 	slog.Info("calendar: booking mirrored", "booking_id", in.BookingID, "event_id", eventID)
+	return nil
 }
 
-// SyncBookingCancelled removes the mirrored event. Same never-fail posture:
-// the booking is already cancelled and both parties have been emailed.
-func (s *Service) SyncBookingCancelled(ctx context.Context, hostID, bookingID string) {
+// SyncBookingCancelled removes the mirrored event, including orphaned inserts.
+func (s *Service) SyncBookingCancelled(ctx context.Context, hostID, bookingID string) error {
 	mapping, err := s.store.GetBookingCalendarEvent(ctx, bookingID, provider)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			slog.Warn("calendar: lookup mirrored event", "err", err, "booking_id", bookingID)
-		}
-		return // never mirrored — nothing to delete
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
 	}
-	conn, ok := s.connectionFor(ctx, hostID, "delete")
-	if !ok {
-		return
+	conn, err := s.connectionFor(ctx, hostID, "delete")
+	if err != nil || conn == nil {
+		return err
+	}
+	// An insert may have succeeded just before its response or mapping was
+	// lost. The deterministic ID lets cancellation clean it up anyway.
+	if mapping == nil {
+		mapping = &store.BookingCalendarEvent{CalendarID: conn.CalendarID, EventID: gcal.EventID(bookingID)}
 	}
 	token, err := s.accessToken(ctx, conn)
 	if err != nil {
 		s.recordWriteFailure(ctx, conn, "delete", bookingID, err)
-		return
+		return err
 	}
 	_, err = timedCall(ctx, "events.delete", func(ctx context.Context) (struct{}, error) {
 		return struct{}{}, s.client.DeleteEvent(ctx, token, mapping.CalendarID, mapping.EventID)
@@ -439,31 +437,36 @@ func (s *Service) SyncBookingCancelled(ctx context.Context, hostID, bookingID st
 		// deleting, and dropping it would turn a retryable gap into a
 		// permanent stale event in the host's calendar.
 		s.recordWriteFailure(ctx, conn, "delete", bookingID, err)
-		return
+		return err
 	}
 	if err := s.store.DeleteBookingCalendarEvent(ctx, bookingID, provider); err != nil {
 		slog.Warn("calendar: mapping cleanup failed", "err", err, "booking_id", bookingID)
+		return err
 	}
 	_ = s.store.RecordCalendarSync(ctx, conn.ID, nil)
 	slog.Info("calendar: mirrored event removed", "booking_id", bookingID)
+	return nil
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────
 
 // connectionFor loads a usable connection, or reports that there is none.
-func (s *Service) connectionFor(ctx context.Context, hostID, action string) (*store.CalendarConnection, bool) {
+func (s *Service) connectionFor(ctx context.Context, hostID, action string) (*store.CalendarConnection, error) {
 	conn, err := s.store.GetCalendarConnection(ctx, hostID, provider)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			slog.Warn("calendar: load connection", "err", err, "host_id", hostID, "action", action)
 			metrics.CalendarWritebackFailures.WithLabelValues(action).Inc()
 		}
-		return nil, false
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	if !conn.Connected() {
-		return nil, false
+		return nil, ErrReconnectRequired
 	}
-	return conn, true
+	return conn, nil
 }
 
 // accessToken returns a usable access token, refreshing first when the stored
@@ -567,12 +570,10 @@ type BusySource interface {
 	BusyPeriods(ctx context.Context, hostID string, fromUTC, toUTC time.Time) ([]Interval, error)
 }
 
-// BookingSync is what the booking handlers depend on. Neither method returns
-// an error, which is the contract: calendar sync must never be able to fail a
-// booking.
+// BookingSync returns delivery failures so the outbox can retry them.
 type BookingSync interface {
-	SyncBookingCreated(ctx context.Context, in BookingEvent)
-	SyncBookingCancelled(ctx context.Context, hostID, bookingID string)
+	SyncBookingCreated(ctx context.Context, in BookingEvent) error
+	SyncBookingCancelled(ctx context.Context, hostID, bookingID string) error
 }
 
 // Connector is what the /me/calendar handlers depend on.

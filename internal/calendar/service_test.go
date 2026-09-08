@@ -344,16 +344,16 @@ func TestSyncBookingCreatedStoresMapping(t *testing.T) {
 	}
 }
 
-// The booking already exists by this point. A Google failure must be recorded,
-// not propagated, and must never panic the request.
-func TestSyncBookingCreatedAbsorbsFailure(t *testing.T) {
+func TestSyncBookingCreatedReturnsFailureForDurableRetry(t *testing.T) {
 	st := &fakeStore{}
 	svc := newTestService(t, st, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	st.conn = liveConn(t, svc)
 
-	svc.SyncBookingCreated(context.Background(), bookingEvent())
+	if err := svc.SyncBookingCreated(context.Background(), bookingEvent()); err == nil {
+		t.Fatal("worker must be told that delivery failed")
+	}
 
 	if st.created != nil {
 		t.Fatal("mapping stored despite the insert failing")
@@ -423,13 +423,23 @@ func TestSyncBookingCancelledKeepsMappingOnFailure(t *testing.T) {
 	}
 }
 
-func TestSyncBookingCancelledWithoutMappingIsNoop(t *testing.T) {
+func TestSyncBookingCancelledWithoutMappingDeletesDeterministicEvent(t *testing.T) {
 	st := &fakeStore{}
+	called := false
 	svc := newTestService(t, st, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("Google must not be called when nothing was mirrored")
+		called = true
+		if r.Method != http.MethodDelete || !strings.HasSuffix(r.URL.Path, "/"+gcal.EventID("book-1")) {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	st.conn = liveConn(t, svc)
-	svc.SyncBookingCancelled(context.Background(), "host-1", "book-1")
+	if err := svc.SyncBookingCancelled(context.Background(), "host-1", "book-1"); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("orphan cleanup was not attempted")
+	}
 }
 
 // ─── OAuth lifecycle ─────────────────────────────────────────────────────────

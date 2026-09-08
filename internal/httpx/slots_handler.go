@@ -281,7 +281,7 @@ func handleListSlots(st store.Storer, deps BookingDeps, hostSlug, eventSlug stri
 			})
 			return
 		}
-		bookings, err := st.ListBookingsForEventInRange(r.Context(), event.ID, fromUTC, toUTC)
+		bookings, err := st.ListBookingsForHostInRange(r.Context(), host.ID, fromUTC, toUTC)
 		if err != nil {
 			slog.Error("slots: list bookings", "err", err, "event_id", event.ID)
 			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not load slots")
@@ -490,9 +490,15 @@ func isSlotConflicted(slotUTC time.Time, duration, bufferBefore, bufferAfter tim
 	slotStart := slotUTC.Add(-bufferBefore)
 	slotEnd := slotUTC.Add(duration).Add(bufferAfter)
 	for _, b := range bookings {
-		// Existing booking occupies [start-bufferBefore, end+bufferAfter].
-		bStart := b.StartsAt.Add(-bufferBefore)
-		bEnd := b.EndsAt.Add(bufferAfter)
+		before, after := bufferBefore, bufferAfter
+		if b.BufferBeforeMin != nil {
+			before = time.Duration(*b.BufferBeforeMin) * time.Minute
+		}
+		if b.BufferAfterMin != nil {
+			after = time.Duration(*b.BufferAfterMin) * time.Minute
+		}
+		bStart := b.StartsAt.Add(-before)
+		bEnd := b.EndsAt.Add(after)
 		if slotStart.Before(bEnd) && slotEnd.After(bStart) {
 			return true
 		}
@@ -510,7 +516,7 @@ func isSlotConflicted(slotUTC time.Time, duration, bufferBefore, bufferAfter tim
 func checkBookingConflict(ctx context.Context, st store.Storer, event store.EventType, startsAt, endsAt time.Time) error {
 	bufferBefore := time.Duration(event.BufferBeforeMin) * time.Minute
 	bufferAfter := time.Duration(event.BufferMin) * time.Minute
-	bookings, err := st.ListBookingsForEventInRange(ctx, event.ID,
+	bookings, err := st.ListBookingsForHostInRange(ctx, event.HostID,
 		startsAt.Add(-bufferBefore), endsAt.Add(bufferAfter))
 	if err != nil {
 		return err

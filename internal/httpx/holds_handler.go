@@ -97,6 +97,9 @@ func handleCreateHold(st store.Storer) http.HandlerFunc {
 			return
 		}
 		endsAt := startsAt.Add(time.Duration(event.DurationMin) * time.Minute)
+		if !enforceBookingAvailability(w, r, st, *event, startsAt) {
+			return
+		}
 
 		// Same conflict check as POST /bookings — if a booking or an active
 		// hold already covers this window, refuse.
