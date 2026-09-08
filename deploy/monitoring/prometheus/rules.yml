@@ -1,6 +1,14 @@
 groups:
   - name: vartalaap
     rules:
+      - alert: VartalaapNotificationBacklog
+        expr: max by (environment) (vartalaap_outbox_oldest_seconds) > 300
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Booking notifications have been pending for more than five minutes
+          description: Check outbox retry logs, email provider configuration, and Google reconnect status. Pending jobs survive restarts.
       - alert: VartalaapScrapeDown
         expr: up{job="vartalaap-api"} == 0
         for: 2m

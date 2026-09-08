@@ -13,6 +13,7 @@ import (
 // so the email package doesn't import store/* (and so test fixtures stay
 // tiny). The caller in httpx fills this from store.Booking + lookups.
 type BookingInput struct {
+	CreatedAt          time.Time
 	GuestName          string
 	GuestEmail         string
 	HostName           string
@@ -263,7 +264,11 @@ func BuildICS(in BookingInput, location string) []byte {
 	w("METHOD:PUBLISH")
 	w("BEGIN:VEVENT")
 	w("UID:" + in.MeetCode + "@sessionly")
-	w("DTSTAMP:" + time.Now().UTC().Format("20060102T150405Z"))
+	stamp := in.CreatedAt
+	if stamp.IsZero() {
+		stamp = time.Now()
+	}
+	w("DTSTAMP:" + stamp.UTC().Format("20060102T150405Z"))
 	w("DTSTART:" + in.StartsAt.UTC().Format("20060102T150405Z"))
 	w("DTEND:" + in.EndsAt.UTC().Format("20060102T150405Z"))
 	w("SUMMARY:" + icsEscape(in.EventTitle))

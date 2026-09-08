@@ -28,6 +28,13 @@ func bookingFixture(t *testing.T, st *memStore, hostEmail string) (hostUser *sto
 	// Give the host a deterministic slug to mirror the public URL contract.
 	u.Slug = "host-" + u.ID
 	st.users[u.ID] = u
+	var rules []store.AvailabilityRule
+	for day := 0; day < 7; day++ {
+		rules = append(rules, store.AvailabilityRule{DayOfWeek: day, StartTime: "00:00", EndTime: "23:59", Timezone: "UTC"})
+	}
+	if _, err := st.ReplaceAvailability(context.Background(), u.ID, rules); err != nil {
+		t.Fatal(err)
+	}
 
 	created, err := st.CreateEventType(context.Background(), store.EventType{
 		HostID:        u.ID,

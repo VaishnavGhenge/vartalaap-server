@@ -52,16 +52,18 @@ type fakeSync struct {
 	cancelled []string
 }
 
-func (f *fakeSync) SyncBookingCreated(_ context.Context, in calendar.BookingEvent) {
+func (f *fakeSync) SyncBookingCreated(_ context.Context, in calendar.BookingEvent) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created = append(f.created, in)
+	return nil
 }
 
-func (f *fakeSync) SyncBookingCancelled(_ context.Context, _, bookingID string) {
+func (f *fakeSync) SyncBookingCancelled(_ context.Context, _, bookingID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cancelled = append(f.cancelled, bookingID)
+	return nil
 }
 
 func (f *fakeSync) Created() []calendar.BookingEvent {

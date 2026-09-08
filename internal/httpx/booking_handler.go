@@ -22,17 +22,19 @@ import (
 // signatures from sprouting positional parameters every time the booking
 // flow grows a new side effect.
 type BookingDeps struct {
-	Mailer       email.Mailer
-	PublicAppURL string
-	RoomWindow   BookingRoomWindow
+	// Production stores enqueue in the booking transaction; do not also send
+	// inline. The inline path remains for lightweight handler test doubles.
+	DurableNotifications bool
+	Mailer               email.Mailer
+	PublicAppURL         string
+	RoomWindow           BookingRoomWindow
 
 	// Busy reads the host's external-calendar busy windows so slot generation
 	// and booking creation both see them. Nil when calendar sync is not
 	// configured, which every call site must tolerate.
 	Busy calendar.BusySource
 	// CalendarSync mirrors bookings into the host's calendar. Nil-safe for the
-	// same reason. Neither of its methods returns an error by design: a
-	// calendar write must never be able to fail a booking.
+	// same reason. Production delivery runs through the outbox worker.
 	CalendarSync calendar.BookingSync
 }
 
@@ -270,6 +272,9 @@ func handleCreateBooking(st store.Storer, deps BookingDeps) http.HandlerFunc {
 			return
 		}
 		endsAt := startsAt.Add(time.Duration(event.DurationMin) * time.Minute)
+		if !enforceBookingAvailability(w, r, st, *event, startsAt) {
+			return
+		}
 
 		// Reject slot collisions before we burn a meet-code generation
 		// attempt. The same predicate is used by /slots so the picker and
@@ -359,6 +364,10 @@ func handleCreateBooking(st store.Storer, deps BookingDeps) http.HandlerFunc {
 				created = b
 				break
 			}
+			if errors.Is(cerr, store.ErrSlotTaken) {
+				WriteError(w, http.StatusConflict, "SLOT_TAKEN", "this slot is no longer available")
+				return
+			}
 			if !errors.Is(cerr, store.ErrConflict) {
 				slog.Error("bookings: create", "err", cerr, "host_id", host.ID, "event_id", event.ID)
 				WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not create booking")
@@ -399,7 +408,7 @@ func handleCreateBooking(st store.Storer, deps BookingDeps) http.HandlerFunc {
 // 6-second context cap is enough for two SMTP round-trips on any healthy
 // provider while keeping the request from hanging on a stuck one.
 func sendBookingEmails(ctx context.Context, deps BookingDeps, b *store.Booking, event *store.EventType, host *store.User, guestName, guestEmail string) {
-	if deps.Mailer == nil {
+	if deps.DurableNotifications || deps.Mailer == nil {
 		return
 	}
 	in := email.BookingInput{
@@ -457,7 +466,7 @@ func checkExternalBusyConflict(ctx context.Context, deps BookingDeps, hostID str
 // path is easier to reason about than a background worker whose failures
 // nobody sees. The 8-second cap covers gcal's three-attempt retry schedule.
 func syncBookingToCalendar(ctx context.Context, deps BookingDeps, b *store.Booking, event *store.EventType, host *store.User) {
-	if deps.CalendarSync == nil || event == nil || host == nil {
+	if deps.DurableNotifications || deps.CalendarSync == nil || event == nil || host == nil {
 		return
 	}
 	syncCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -478,7 +487,7 @@ func syncBookingToCalendar(ctx context.Context, deps BookingDeps, b *store.Booki
 
 // unsyncBookingFromCalendar removes the mirrored event after a cancellation.
 func unsyncBookingFromCalendar(ctx context.Context, deps BookingDeps, b *store.Booking) {
-	if deps.CalendarSync == nil || b == nil {
+	if deps.DurableNotifications || deps.CalendarSync == nil || b == nil {
 		return
 	}
 	syncCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -602,7 +611,7 @@ func stringPtrValue(v *string) string {
 // "guest" — used only in the subject/body so each party reads the right
 // framing ("X cancelled" vs "you cancelled").
 func sendCancellationEmails(ctx context.Context, deps BookingDeps, b *store.Booking, event *store.EventType, host *store.User, cancelledBy string) {
-	if deps.Mailer == nil || event == nil || host == nil {
+	if deps.DurableNotifications || deps.Mailer == nil || event == nil || host == nil {
 		return
 	}
 	in := email.BookingInput{
