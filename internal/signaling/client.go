@@ -237,7 +237,7 @@ func (c *Client) handle(env *Envelope) {
 		// (audio, video, screen). Reject junk instead of storing it — the
 		// stored set is replayed to every later joiner.
 		if d.SessionID == "" || len(d.SessionID) > maxSfuIDLen ||
-			len(d.Tracks) == 0 || len(d.Tracks) > maxAnnouncedTracks {
+			len(d.Tracks) > maxAnnouncedTracks {
 			c.sendError("invalid sfu-announce")
 			return
 		}

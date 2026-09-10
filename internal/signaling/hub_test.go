@@ -246,6 +246,88 @@ func TestHubAnnounceSfuTracks_ReplacesStoredSet(t *testing.T) {
 	}
 }
 
+func TestHubAnnounceSfuTracks_WithdrawalStopsReplayAndNotifiesObservers(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-publisher")
+	observer := testClient("peer-observer")
+	setTestClientState(publisher, "Alice", "presence-alice")
+	setTestClientState(observer, "Bob", "presence-bob")
+	hub.join(publisher, "room-1")
+	hub.join(observer, "room-1")
+	drainEnvelopes(t, publisher)
+	drainEnvelopes(t, observer)
+
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
+		SessionID: "cf-session-old",
+		Tracks:    []SfuTrackInfo{{TrackName: "stale-track"}},
+	})
+	drainEnvelopes(t, observer)
+
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{SessionID: "cf-session-old"})
+	env, ok := findEnvelope(drainEnvelopes(t, observer), MsgSfuTracks)
+	if !ok {
+		t.Fatal("observer should receive the withdrawal")
+	}
+	var withdrawn SfuTracksData
+	if err := json.Unmarshal(env.Data, &withdrawn); err != nil {
+		t.Fatalf("unmarshal withdrawal: %v", err)
+	}
+	if withdrawn.SessionID != "cf-session-old" || len(withdrawn.Tracks) != 0 {
+		t.Fatalf("unexpected withdrawal: %+v", withdrawn)
+	}
+	if withdrawn.Version == 0 {
+		t.Fatal("withdrawal must carry a room version")
+	}
+
+	late := testClient("peer-late")
+	setTestClientState(late, "Carol", "presence-carol")
+	hub.join(late, "room-1")
+	if _, ok := findEnvelope(drainEnvelopes(t, late), MsgSfuTracks); ok {
+		t.Fatal("late joiner must not receive the withdrawn session")
+	}
+}
+
+func TestHubAnnounceSfuTracks_StaleWithdrawalCannotEraseReplacement(t *testing.T) {
+	hub := NewHub()
+	publisher := testClient("peer-publisher")
+	observer := testClient("peer-observer")
+	setTestClientState(publisher, "Alice", "presence-alice")
+	setTestClientState(observer, "Bob", "presence-bob")
+	hub.join(publisher, "room-1")
+	hub.join(observer, "room-1")
+	drainEnvelopes(t, publisher)
+	drainEnvelopes(t, observer)
+
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{
+		SessionID: "cf-session-new",
+		Tracks:    []SfuTrackInfo{{TrackName: "current-track"}},
+	})
+	drainEnvelopes(t, observer)
+
+	// A delayed callback from the replaced generation names the old session.
+	// It must be ignored instead of deleting or broadcasting over the current
+	// publication.
+	hub.AnnounceSfuTracks(publisher, SfuTracksData{SessionID: "cf-session-old"})
+	if _, ok := findEnvelope(drainEnvelopes(t, observer), MsgSfuTracks); ok {
+		t.Fatal("stale withdrawal must not be broadcast")
+	}
+
+	late := testClient("peer-late")
+	setTestClientState(late, "Carol", "presence-carol")
+	hub.join(late, "room-1")
+	env, ok := findEnvelope(drainEnvelopes(t, late), MsgSfuTracks)
+	if !ok {
+		t.Fatal("replacement session should remain available for replay")
+	}
+	var replay SfuTracksData
+	if err := json.Unmarshal(env.Data, &replay); err != nil {
+		t.Fatalf("unmarshal replay: %v", err)
+	}
+	if replay.SessionID != "cf-session-new" {
+		t.Fatalf("replayed session = %q, want replacement", replay.SessionID)
+	}
+}
+
 // An announce from a client that is not in any room must error, not panic or
 // store state.
 func TestHubAnnounceSfuTracks_NotInRoom(t *testing.T) {

@@ -50,6 +50,21 @@ func (r *Room) setSfuTracks(peerID string, data SfuTracksData) uint64 {
 	return r.version
 }
 
+// withdrawSfuTracks removes the named obsolete session only when it is still
+// current. A delayed withdrawal from an older publish generation must not
+// erase a replacement that the room has already stored.
+func (r *Room) withdrawSfuTracks(peerID, sessionID string) (uint64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.sfuTracks[peerID]
+	if !ok || current.SessionID != sessionID {
+		return r.version, false
+	}
+	r.version++
+	delete(r.sfuTracks, peerID)
+	return r.version, true
+}
+
 func (r *Room) removeSfuTracks(peerID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

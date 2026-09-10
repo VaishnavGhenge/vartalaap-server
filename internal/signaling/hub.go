@@ -259,7 +259,15 @@ func (h *Hub) AnnounceSfuTracks(c *Client, data SfuTracksData) {
 	metrics.SfuAnnounces.Inc()
 	// Stamp the broadcast with the version the write landed at so a client can
 	// order it against snapshots that may arrive out of sequence.
-	data.Version = room.setSfuTracks(c.id, data)
+	if len(data.Tracks) == 0 {
+		var withdrawn bool
+		data.Version, withdrawn = room.withdrawSfuTracks(c.id, data.SessionID)
+		if !withdrawn {
+			return
+		}
+	} else {
+		data.Version = room.setSfuTracks(c.id, data)
+	}
 	b, _ := json.Marshal(data)
 	payload, _ := json.Marshal(Envelope{Type: MsgSfuTracks, Room: c.room, From: c.id, Data: b})
 	room.broadcastExcept(c.id, payload)
