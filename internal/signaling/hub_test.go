@@ -54,6 +54,32 @@ func boolPtr(v bool) *bool {
 	return &v
 }
 
+func TestCriticalBroadcastDoesNotSerializeBehindSlowClients(t *testing.T) {
+	slow := &Client{id: "slow", send: make(chan []byte, 1)}
+	healthy := &Client{id: "healthy", send: make(chan []byte, 1)}
+	slow.send <- []byte("backlog")
+	done := make(chan struct{})
+	go func() {
+		enqueueCritical([]*Client{slow, healthy}, []byte("critical"))
+		close(done)
+	}()
+
+	select {
+	case got := <-healthy.send:
+		if string(got) != "critical" {
+			t.Fatalf("message=%q", got)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("healthy client queued behind a backed-up participant")
+	}
+	<-slow.send
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("critical broadcast did not finish after slow queue recovered")
+	}
+}
+
 func TestHubJoinReplacesStalePeerWithSamePresenceID(t *testing.T) {
 	hub := NewHub()
 	oldPeer := testClient("peer-old")

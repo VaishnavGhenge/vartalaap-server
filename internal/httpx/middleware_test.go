@@ -16,8 +16,9 @@ func TestRouteLabel(t *testing.T) {
 
 		// Previously unlabelled and sharing the "/other" bucket with genuine
 		// junk, which made that bucket unreadable.
-		"/auth/guest":  "/auth/guest",
-		"/room/status": "/room/status",
+		"/auth/guest":         "/auth/guest",
+		"/auth/guest/refresh": "/auth/guest/refresh",
+		"/room/status":        "/room/status",
 
 		// Existing statics, pinned so a future edit to the switch can't drop one.
 		"/healthz":         "/healthz",

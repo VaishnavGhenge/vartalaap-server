@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"log/slog"
 	"sort"
 	"sync"
 )
@@ -221,17 +222,30 @@ func (r *Room) get(peerID string) *Client {
 }
 
 func (r *Room) broadcastExcept(exceptID string, payload []byte) {
-	clients := r.clientsExcept(exceptID)
-	for _, c := range clients {
-		c.enqueue(payload)
-	}
+	enqueueCritical(r.clientsExcept(exceptID), payload)
 }
 
 func (r *Room) broadcastExceptIDs(exceptIDs map[string]bool, payload []byte) {
-	clients := r.clientsExceptIDs(exceptIDs)
-	for _, c := range clients {
-		c.enqueue(payload)
+	enqueueCritical(r.clientsExceptIDs(exceptIDs), payload)
+}
+
+// Critical room events retain their bounded delivery wait, but every client
+// waits concurrently. One backed-up participant can therefore delay room
+// convergence by at most sendQueueTimeout, never that timeout multiplied by
+// the number of slow participants.
+func enqueueCritical(clients []*Client, payload []byte) {
+	var wg sync.WaitGroup
+	wg.Add(len(clients))
+	for _, client := range clients {
+		go func(c *Client) {
+			defer wg.Done()
+			if !c.enqueue(payload) {
+				slog.Warn("signaling_broadcast_timeout", "peer_id", c.id)
+				return
+			}
+		}(client)
 	}
+	wg.Wait()
 }
 
 func (r *Room) broadcastExceptBestEffort(exceptID string, payload []byte) {

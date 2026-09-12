@@ -140,7 +140,7 @@ func routeLabel(path string) string {
 		"/ws", "/meets/new", "/ice-servers", "/room/status",
 		"/auth/register", "/auth/login", "/auth/refresh", "/auth/logout", "/auth/me",
 		"/auth/google", "/auth/google/callback",
-		"/auth/guest",
+		"/auth/guest", "/auth/guest/refresh",
 		"/me/availability", "/me/event-types", "/me/bookings", "/bookings", "/holds",
 		// Calendar routes are all static despite the /me/calendar/ prefix
 		// registration — the handler switches on a fixed action set, so an

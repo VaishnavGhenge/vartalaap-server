@@ -26,6 +26,8 @@ type guestTokenResponse struct {
 	SfuToken string `json:"sfuToken"`
 }
 
+const GuestTokenTTL = 2 * time.Hour
+
 // NewGuestTokenHandler returns POST /auth/guest — public (no auth required).
 // Validates the cancel token from the booking confirmation email and issues
 // a room-scoped guest JWT for SFU access.
@@ -92,5 +94,41 @@ func NewGuestTokenHandler(allowedOrigins []string, deps GuestTokenDeps) http.Han
 		}
 
 		WriteJSON(w, http.StatusOK, guestTokenResponse{SfuToken: token})
+	}
+}
+
+// NewGuestTokenRefreshHandler renews the room-scoped identity used by an
+// admitted guest. The old token itself proves the guest identity and room;
+// the room gate prevents rolling that identity beyond the call's lifetime.
+func NewGuestTokenRefreshHandler(allowedOrigins []string, jwtSecret string, gate RoomAccessGate) http.HandlerFunc {
+	lim := NewRateLimiter(30, 60)
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		roomID := auth.RoomIDFromContext(r.Context())
+		guestID, ok := auth.UserIDFromContext(r.Context())
+		if !ok || roomID == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if gate != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			err := gate(ctx, roomID, false)
+			cancel()
+			if err != nil {
+				WriteError(w, http.StatusForbidden, "ROOM_UNAVAILABLE", "this room is no longer available")
+				return
+			}
+		}
+		token, err := auth.SignGuestToken(guestID, roomID, jwtSecret, GuestTokenTTL)
+		if err != nil {
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not issue token")
+			return
+		}
+		WriteJSON(w, http.StatusOK, guestTokenResponse{SfuToken: token})
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !enforceAPIRequest(w, r, allowedOrigins, http.MethodPost, lim) {
+			return
+		}
+		RequireRoomMember(jwtSecret, handler)(w, r)
 	}
 }

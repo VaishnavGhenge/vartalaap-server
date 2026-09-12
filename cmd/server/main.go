@@ -269,7 +269,7 @@ func main() {
 
 		// Guest token function for the knock/admit flow (no booking required).
 		hub.SetGuestTokenFn(func(peerID, roomID string) (string, error) {
-			return auth.SignGuestToken("g:"+peerID, roomID, cfg.JWTSecret, 2*time.Hour)
+			return auth.SignGuestToken("g:"+peerID, roomID, cfg.JWTSecret, httpx.GuestTokenTTL)
 		})
 
 		mux.HandleFunc("/auth/guest", httpx.NewGuestTokenHandler(cfg.AllowedOrigins, httpx.GuestTokenDeps{
@@ -277,6 +277,9 @@ func main() {
 			JWTSecret:  cfg.JWTSecret,
 			RoomWindow: bookingDeps.RoomWindow,
 		}))
+		mux.HandleFunc("/auth/guest/refresh", httpx.NewGuestTokenRefreshHandler(
+			cfg.AllowedOrigins, cfg.JWTSecret, roomGate,
+		))
 
 		if cfg.GoogleAuthEnabled() {
 			httpx.AuthHandlers(mux, st, authCfg, googleauth.New(cfg.GoogleClientID, cfg.GoogleClientSecret, cfg.GoogleAuthRedirectURL))
