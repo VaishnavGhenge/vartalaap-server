@@ -11,7 +11,7 @@ scrape_configs:
     static_configs:
       - targets: [sessionly-api.railway.internal:8080]
         labels:
-          environment: staging
+          environment: __ENVIRONMENT__
     authorization:
       type: Bearer
       credentials_file: /tmp/ops-token
@@ -19,4 +19,4 @@ scrape_configs:
     static_configs:
       - targets: [localhost:9090]
         labels:
-          environment: staging
+          environment: __ENVIRONMENT__

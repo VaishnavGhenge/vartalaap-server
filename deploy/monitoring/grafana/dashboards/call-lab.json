@@ -11,8 +11,7 @@
   },
   "timezone": "browser",
   "tags": [
-    "vartalaap",
-    "staging"
+    "vartalaap"
   ],
   "panels": [
     {

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 
 const variables = JSON.parse(execFileSync('railway', [
   'variable', 'list', '--project', 'adc6b001-6413-4bd3-84cf-6c6ba4bde15c',
-  '--environment', 'cde449e7-b30d-4cb1-95b4-9223bceab440',
+  '--environment', '3a097e84-9216-4ca6-9ab9-28344423ea89',
   '--service', 'cf911b58-f836-44ce-98b1-304ec9fd1be6', '--json',
 ], { encoding: 'utf8', timeout: 30000, env: {
   ...process.env, RAILWAY_CALLER: 'skill:use-railway@1.4.0',
@@ -10,7 +10,7 @@ const variables = JSON.parse(execFileSync('railway', [
 } }))
 const password = variables.GF_SECURITY_ADMIN_PASSWORD
 if (!password) throw new Error('Grafana credential unavailable; retrieve it through Railway')
-const base = 'https://grafana-staging-6599.up.railway.app'
+const base = 'https://grafana-production-7ad6.up.railway.app'
 const headers = { Authorization: `Basic ${Buffer.from(`admin:${password}`).toString('base64')}` }
 async function get(path, authenticated = true) {
   const response = await fetch(`${base}${path}`, { headers: authenticated ? headers : {}, signal: AbortSignal.timeout(20000) })
