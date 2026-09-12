@@ -104,6 +104,30 @@ func TestCreateAndGetUser(t *testing.T) {
 	}
 }
 
+func TestCreateOrLinkOAuthUser(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	email := unique("oauth") + "@example.com"
+	slug := unique("oauth-user")
+	subject := "subject-" + unique("id")
+	avatar := "https://images.example/avatar.jpg"
+
+	u, err := st.CreateOrLinkOAuthUser(ctx, "google", subject, email, "OAuth User", slug, "disabled-password", &avatar)
+	if err != nil {
+		t.Fatalf("CreateOrLinkOAuthUser: %v", err)
+	}
+	byIdentity, err := st.GetUserByOAuthIdentity(ctx, "google", subject)
+	if err != nil {
+		t.Fatalf("GetUserByOAuthIdentity: %v", err)
+	}
+	if byIdentity.ID != u.ID {
+		t.Fatalf("identity user %q != created user %q", byIdentity.ID, u.ID)
+	}
+	if u.Email != email || u.AvatarURL == nil || *u.AvatarURL != avatar {
+		t.Fatalf("unexpected user: %+v", u)
+	}
+}
+
 func TestCreateUserDuplicateEmail(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()

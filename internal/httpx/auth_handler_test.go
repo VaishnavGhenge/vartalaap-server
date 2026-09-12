@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/vaishnavghenge/vartalaap-server/internal/auth"
+	"github.com/vaishnavghenge/vartalaap-server/internal/googleauth"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
 
@@ -29,6 +31,7 @@ type memStore struct {
 	holds         map[string]*store.SlotHold             // key: hold token
 	calConns      map[string]*store.CalendarConnection   // key: userID|provider
 	calEvents     map[string]*store.BookingCalendarEvent // key: bookingID|provider
+	oauthUsers    map[string]string                      // provider|subject -> userID
 	nextID        int
 	nextAvailID   int
 	nextEventID   int
@@ -39,16 +42,53 @@ type memStore struct {
 
 func newMemStore() *memStore {
 	return &memStore{
-		users:     make(map[string]*store.User),
-		byEmail:   make(map[string]string),
-		tokens:    make(map[string]*store.RefreshToken),
-		avail:     make(map[string][]store.AvailabilityRule),
-		events:    make(map[string]*store.EventType),
-		bookings:  make(map[string]*store.Booking),
-		holds:     make(map[string]*store.SlotHold),
-		calConns:  make(map[string]*store.CalendarConnection),
-		calEvents: make(map[string]*store.BookingCalendarEvent),
+		users:      make(map[string]*store.User),
+		byEmail:    make(map[string]string),
+		tokens:     make(map[string]*store.RefreshToken),
+		avail:      make(map[string][]store.AvailabilityRule),
+		events:     make(map[string]*store.EventType),
+		bookings:   make(map[string]*store.Booking),
+		holds:      make(map[string]*store.SlotHold),
+		calConns:   make(map[string]*store.CalendarConnection),
+		calEvents:  make(map[string]*store.BookingCalendarEvent),
+		oauthUsers: make(map[string]string),
 	}
+}
+
+func (m *memStore) GetUserByOAuthIdentity(_ context.Context, provider, subject string) (*store.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id, ok := m.oauthUsers[provider+"|"+subject]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return m.users[id], nil
+}
+
+func (m *memStore) CreateOrLinkOAuthUser(_ context.Context, provider, subject, email, name, slug, passwordHash string, avatarURL *string) (*store.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := provider + "|" + subject
+	if id, ok := m.oauthUsers[key]; ok {
+		return m.users[id], nil
+	}
+	var u *store.User
+	if id, ok := m.byEmail[email]; ok {
+		u = m.users[id]
+		for existing, userID := range m.oauthUsers {
+			if userID == u.ID && strings.HasPrefix(existing, provider+"|") {
+				return nil, store.ErrConflict
+			}
+		}
+	} else {
+		m.nextID++
+		u = &store.User{ID: fmt.Sprintf("user-%d", m.nextID), Email: email, Name: name, Slug: slug,
+			PasswordHash: passwordHash, AvatarURL: avatarURL, Plan: "free", CreatedAt: time.Now()}
+		m.users[u.ID] = u
+		m.byEmail[email] = u.ID
+	}
+	m.oauthUsers[key] = u.ID
+	return u, nil
 }
 
 func (m *memStore) id() string {
@@ -842,6 +882,84 @@ func TestLoginUnknownEmail(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+type fakeGoogleAuth struct {
+	identity googleauth.Identity
+	verifier string
+}
+
+func (f *fakeGoogleAuth) AuthCodeURL(state, challenge string) string {
+	return "https://accounts.example/auth?state=" + url.QueryEscape(state) + "&challenge=" + url.QueryEscape(challenge)
+}
+
+func (f *fakeGoogleAuth) Exchange(_ context.Context, _, verifier string) (googleauth.Identity, error) {
+	f.verifier = verifier
+	return f.identity, nil
+}
+
+func TestGoogleSignInCreatesSessionAndPreservesNext(t *testing.T) {
+	st := newMemStore()
+	cfg := testCfg()
+	cfg.PublicAppURL = testOrigin
+	provider := &fakeGoogleAuth{identity: googleauth.Identity{
+		Subject: "google-123", Email: "alice@example.com", EmailVerified: true,
+		EmailAuthoritative: true, Name: "Alice Smith", Picture: "https://images.example/alice.jpg",
+	}}
+
+	startRec := httptest.NewRecorder()
+	handleGoogleStart(cfg, provider)(startRec, authReq(http.MethodGet, "/auth/google?next=%2Froom%2Fabc", ""))
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("start: %d %s", startRec.Code, startRec.Body.String())
+	}
+	var started map[string]string
+	if err := json.NewDecoder(startRec.Body).Decode(&started); err != nil {
+		t.Fatal(err)
+	}
+	authURL, err := url.Parse(started["authUrl"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := authURL.Query().Get("state")
+	stateCookie := cookieFromResponse(startRec, "sessionly_google_state")
+	pkceCookie := cookieFromResponse(startRec, "sessionly_google_pkce")
+	if state == "" || stateCookie == nil || pkceCookie == nil {
+		t.Fatal("expected state and PKCE cookies")
+	}
+
+	callbackRec := httptest.NewRecorder()
+	callbackReq := authReq(http.MethodGet, "/auth/google/callback?state="+url.QueryEscape(state)+"&code=code", "", stateCookie, pkceCookie)
+	handleGoogleCallback(st, cfg, provider, NewRateLimiter(10, 20))(callbackRec, callbackReq)
+	if callbackRec.Code != http.StatusFound {
+		t.Fatalf("callback: %d %s", callbackRec.Code, callbackRec.Body.String())
+	}
+	if got := callbackRec.Header().Get("Location"); got != testOrigin+"/auth/google/callback?next=%2Froom%2Fabc" {
+		t.Fatalf("location = %q", got)
+	}
+	if provider.verifier != pkceCookie.Value {
+		t.Fatal("callback did not use browser-bound PKCE verifier")
+	}
+	if cookieFromResponse(callbackRec, refreshCookieName) == nil {
+		t.Fatal("expected refresh session cookie")
+	}
+	u, err := st.GetUserByOAuthIdentity(context.Background(), "google", "google-123")
+	if err != nil || u.Email != "alice@example.com" || u.AvatarURL == nil {
+		t.Fatalf("oauth user = %+v, %v", u, err)
+	}
+}
+
+func TestGoogleSignInRejectsMismatchedState(t *testing.T) {
+	cfg := testCfg()
+	cfg.PublicAppURL = testOrigin
+	provider := &fakeGoogleAuth{}
+	rec := httptest.NewRecorder()
+	req := authReq(http.MethodGet, "/auth/google/callback?state=attacker&code=code", "",
+		&http.Cookie{Name: "sessionly_google_state", Value: "different"},
+		&http.Cookie{Name: "sessionly_google_pkce", Value: "verifier"})
+	handleGoogleCallback(newMemStore(), cfg, provider, NewRateLimiter(10, 20))(rec, req)
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != testOrigin+"/login?oauth=invalid_state" {
+		t.Fatalf("unexpected response: %d %q", rec.Code, rec.Header().Get("Location"))
 	}
 }
 

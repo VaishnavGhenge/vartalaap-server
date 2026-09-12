@@ -19,6 +19,8 @@ var ErrSlotTaken = errors.New("slot taken")
 // *Store satisfies it; tests can provide an in-memory double.
 type Storer interface {
 	CreateUser(ctx context.Context, email, name, slug, passwordHash string) (*User, error)
+	CreateOrLinkOAuthUser(ctx context.Context, provider, subject, email, name, slug, passwordHash string, avatarURL *string) (*User, error)
+	GetUserByOAuthIdentity(ctx context.Context, provider, subject string) (*User, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	GetUserByID(ctx context.Context, id string) (*User, error)
 	GetUserBySlug(ctx context.Context, slug string) (*User, error)
@@ -180,6 +182,7 @@ func New(pool *pgxpool.Pool) *Store {
 }
 
 const userCols = `id, email, name, slug, timezone, onboarding_step, avatar_url, password_hash, plan, created_at`
+const qualifiedUserCols = `u.id, u.email, u.name, u.slug, u.timezone, u.onboarding_step, u.avatar_url, u.password_hash, u.plan, u.created_at`
 
 func scanUser(row pgx.Row, u *User) error {
 	return row.Scan(&u.ID, &u.Email, &u.Name, &u.Slug, &u.Timezone, &u.OnboardingStep, &u.AvatarURL, &u.PasswordHash, &u.Plan, &u.CreatedAt)
@@ -198,6 +201,80 @@ func (s *Store) CreateUser(ctx context.Context, email, name, slug, passwordHash 
 			return nil, ErrConflict
 		}
 		return nil, fmt.Errorf("store: create user: %w", err)
+	}
+	return u, nil
+}
+
+func (s *Store) GetUserByOAuthIdentity(ctx context.Context, provider, subject string) (*User, error) {
+	u := &User{}
+	err := scanUser(s.pool.QueryRow(ctx,
+		`SELECT `+qualifiedUserCols+` FROM users u
+		 JOIN oauth_identities oi ON oi.user_id = u.id
+		 WHERE oi.provider=$1 AND oi.subject=$2`, provider, subject,
+	), u)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: get user by oauth identity: %w", err)
+	}
+	return u, nil
+}
+
+// CreateOrLinkOAuthUser atomically resolves an existing provider identity,
+// links a verified email to its existing user, or creates both records. The
+// transaction prevents a callback race from leaving an account without its
+// identity link.
+func (s *Store) CreateOrLinkOAuthUser(ctx context.Context, provider, subject, email, name, slug, passwordHash string, avatarURL *string) (*User, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("store: begin oauth user: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	u := &User{}
+	err = scanUser(tx.QueryRow(ctx,
+		`SELECT `+qualifiedUserCols+` FROM users u
+		 JOIN oauth_identities oi ON oi.user_id = u.id
+		 WHERE oi.provider=$1 AND oi.subject=$2`, provider, subject,
+	), u)
+	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("store: commit oauth lookup: %w", err)
+		}
+		return u, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("store: lookup oauth identity: %w", err)
+	}
+
+	err = scanUser(tx.QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE email=$1 FOR UPDATE`, email), u)
+	if errors.Is(err, pgx.ErrNoRows) {
+		u = &User{}
+		err = scanUser(tx.QueryRow(ctx,
+			`INSERT INTO users (email, name, slug, password_hash, avatar_url)
+			 VALUES ($1,$2,$3,$4,$5) RETURNING `+userCols,
+			email, name, slug, passwordHash, avatarURL,
+		), u)
+	}
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrConflict
+		}
+		return nil, fmt.Errorf("store: resolve oauth email: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO oauth_identities (provider, subject, user_id) VALUES ($1,$2,$3)`,
+		provider, subject, u.ID,
+	); err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrConflict
+		}
+		return nil, fmt.Errorf("store: link oauth identity: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("store: commit oauth user: %w", err)
 	}
 	return u, nil
 }

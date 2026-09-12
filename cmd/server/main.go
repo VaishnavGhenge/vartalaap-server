@@ -23,6 +23,7 @@ import (
 	"github.com/vaishnavghenge/vartalaap-server/internal/db"
 	"github.com/vaishnavghenge/vartalaap-server/internal/email"
 	"github.com/vaishnavghenge/vartalaap-server/internal/gcal"
+	"github.com/vaishnavghenge/vartalaap-server/internal/googleauth"
 	"github.com/vaishnavghenge/vartalaap-server/internal/httpx"
 	_ "github.com/vaishnavghenge/vartalaap-server/internal/metrics"
 	"github.com/vaishnavghenge/vartalaap-server/internal/notifications"
@@ -156,6 +157,7 @@ func main() {
 			JWTSecret:      cfg.JWTSecret,
 			AccessTokenTTL: cfg.AccessTokenTTL,
 			SecureCookie:   cfg.SecureCookie,
+			PublicAppURL:   cfg.PublicAppURL,
 		}
 		httpx.SFUHandlers(mux, sfuRegistry, cfCalls, authCfg, callRoomGate)
 		log.Println("SFU endpoints enabled")
@@ -178,6 +180,7 @@ func main() {
 			JWTSecret:      cfg.JWTSecret,
 			AccessTokenTTL: cfg.AccessTokenTTL,
 			SecureCookie:   cfg.SecureCookie,
+			PublicAppURL:   cfg.PublicAppURL,
 		}
 		mailer := email.NewFromEnv()
 
@@ -275,7 +278,12 @@ func main() {
 			RoomWindow: bookingDeps.RoomWindow,
 		}))
 
-		httpx.AuthHandlers(mux, st, authCfg)
+		if cfg.GoogleAuthEnabled() {
+			httpx.AuthHandlers(mux, st, authCfg, googleauth.New(cfg.GoogleClientID, cfg.GoogleClientSecret, cfg.GoogleAuthRedirectURL))
+			log.Println("Google sign-in endpoints enabled")
+		} else {
+			httpx.AuthHandlers(mux, st, authCfg)
+		}
 		httpx.MeHandlers(mux, st, authCfg)
 		httpx.BookingHandlers(mux, st, authCfg, bookingDeps)
 		httpx.SlotHandlers(mux, st, authCfg, bookingDeps)

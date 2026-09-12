@@ -36,6 +36,7 @@ type Config struct {
 	GoogleClientID        string
 	GoogleClientSecret    string
 	GoogleRedirectURL     string
+	GoogleAuthRedirectURL string
 	CalendarEncryptionKey string
 
 	// PublicAppURL is the canonical base URL the booking surface lives at —
@@ -70,6 +71,7 @@ func Load() Config {
 		GoogleClientID:        os.Getenv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret:    os.Getenv("GOOGLE_CLIENT_SECRET"),
 		GoogleRedirectURL:     os.Getenv("GOOGLE_REDIRECT_URL"),
+		GoogleAuthRedirectURL: os.Getenv("GOOGLE_AUTH_REDIRECT_URL"),
 		CalendarEncryptionKey: os.Getenv("CALENDAR_ENCRYPTION_KEY"),
 		OpsToken:              os.Getenv("OPS_TOKEN"),
 	}
@@ -95,7 +97,14 @@ func Load() Config {
 		log.Println("WARN: Google Calendar sync disabled (need GOOGLE_CLIENT_ID, " +
 			"GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URL, CALENDAR_ENCRYPTION_KEY)")
 	}
+	if !cfg.GoogleAuthEnabled() {
+		log.Println("WARN: Google sign-in disabled (need GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_AUTH_REDIRECT_URL)")
+	}
 	return cfg
+}
+
+func (c Config) GoogleAuthEnabled() bool {
+	return c.GoogleClientID != "" && c.GoogleClientSecret != "" && c.GoogleAuthRedirectURL != ""
 }
 
 // CalendarEnabled reports whether every credential the calendar feature needs

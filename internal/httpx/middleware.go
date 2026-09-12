@@ -139,6 +139,7 @@ func routeLabel(path string) string {
 	case "/", "/healthz", "/metrics", "/stats", "/dashboard",
 		"/ws", "/meets/new", "/ice-servers", "/room/status",
 		"/auth/register", "/auth/login", "/auth/refresh", "/auth/logout", "/auth/me",
+		"/auth/google", "/auth/google/callback",
 		"/auth/guest",
 		"/me/availability", "/me/event-types", "/me/bookings", "/bookings", "/holds",
 		// Calendar routes are all static despite the /me/calendar/ prefix

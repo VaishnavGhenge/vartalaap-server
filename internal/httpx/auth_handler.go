@@ -2,17 +2,22 @@ package httpx
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/vaishnavghenge/vartalaap-server/internal/auth"
+	"github.com/vaishnavghenge/vartalaap-server/internal/googleauth"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
 
@@ -22,6 +27,8 @@ const (
 	refreshCookiePath     = "/auth"
 	authSessionCookiePath = "/"
 	refreshTokenTTL       = 30 * 24 * time.Hour
+	googleOAuthCookiePath = "/auth/google"
+	googleOAuthTTL        = 10 * time.Minute
 )
 
 var slugSep = regexp.MustCompile(`-{2,}`)
@@ -31,6 +38,12 @@ type AuthConfig struct {
 	JWTSecret      string
 	AccessTokenTTL time.Duration
 	SecureCookie   bool
+	PublicAppURL   string
+}
+
+type GoogleAuthProvider interface {
+	AuthCodeURL(state, codeChallenge string) string
+	Exchange(ctx context.Context, code, codeVerifier string) (googleauth.Identity, error)
 }
 
 type authUserResponse struct {
@@ -63,13 +76,18 @@ func toUserResponse(u *store.User) authUserResponse {
 }
 
 // AuthHandlers wires all /auth/* routes onto mux.
-func AuthHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig) {
+func AuthHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, googleProviders ...GoogleAuthProvider) {
 	lim := NewRateLimiter(10, 20)
 
 	mux.HandleFunc("/auth/register", authRoute(cfg, http.MethodPost, lim, handleRegister(st, cfg)))
 	mux.HandleFunc("/auth/login", authRoute(cfg, http.MethodPost, lim, handleLogin(st, cfg)))
 	mux.HandleFunc("/auth/refresh", authRoute(cfg, http.MethodPost, nil, handleRefresh(st, cfg)))
 	mux.HandleFunc("/auth/logout", authRoute(cfg, http.MethodPost, nil, handleLogout(st, cfg)))
+	if len(googleProviders) > 0 && googleProviders[0] != nil {
+		googleProvider := googleProviders[0]
+		mux.HandleFunc("/auth/google", authRoute(cfg, http.MethodGet, lim, handleGoogleStart(cfg, googleProvider)))
+		mux.HandleFunc("/auth/google/callback", handleGoogleCallback(st, cfg, googleProvider, NewRateLimiter(10, 20)))
+	}
 	mux.HandleFunc("/auth/me", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodOptions:
@@ -84,6 +102,173 @@ func AuthHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
+}
+
+func handleGoogleStart(cfg AuthConfig, provider GoogleAuthProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		next := safeAuthReturnPath(r.URL.Query().Get("next"))
+		nonce, _, err := auth.NewRefreshToken()
+		if err != nil {
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not start Google sign-in")
+			return
+		}
+		state, err := auth.SignPurposeTokenWithReturn(nonce, "google-sign-in", next, cfg.JWTSecret, googleOAuthTTL)
+		if err != nil {
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not start Google sign-in")
+			return
+		}
+		verifier, _, err := auth.NewRefreshToken()
+		if err != nil {
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not start Google sign-in")
+			return
+		}
+		challengeBytes := sha256.Sum256([]byte(verifier))
+		challenge := base64.RawURLEncoding.EncodeToString(challengeBytes[:])
+		setGoogleOAuthCookie(w, "sessionly_google_state", state, cfg.SecureCookie)
+		setGoogleOAuthCookie(w, "sessionly_google_pkce", verifier, cfg.SecureCookie)
+		WriteJSON(w, http.StatusOK, map[string]string{"authUrl": provider.AuthCodeURL(state, challenge)})
+	}
+}
+
+func handleGoogleCallback(st store.Storer, cfg AuthConfig, provider GoogleAuthProvider, limiter *RateLimiter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !limiter.Allow(r.URL.Path + "|" + clientIP(r)) {
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		q := r.URL.Query()
+		stateCookie, stateErr := r.Cookie("sessionly_google_state")
+		pkceCookie, pkceErr := r.Cookie("sessionly_google_pkce")
+		clearGoogleOAuthCookies(w, cfg.SecureCookie)
+		if stateErr != nil || pkceErr != nil || q.Get("state") == "" ||
+			subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(stateCookie.Value)) != 1 {
+			redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "invalid_state")
+			return
+		}
+		_, next, err := auth.VerifyPurposeTokenWithReturn(q.Get("state"), "google-sign-in", cfg.JWTSecret)
+		if err != nil {
+			redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "invalid_state")
+			return
+		}
+		if q.Get("error") != "" || q.Get("code") == "" {
+			redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "denied")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		identity, err := provider.Exchange(ctx, q.Get("code"), pkceCookie.Value)
+		cancel()
+		if err != nil {
+			slog.Warn("google sign-in: exchange", "err", err)
+			redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "failed")
+			return
+		}
+		if !identity.EmailVerified {
+			redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "failed")
+			return
+		}
+		if u, lookupErr := st.GetUserByOAuthIdentity(r.Context(), "google", identity.Subject); lookupErr == nil {
+			finishGoogleSignIn(w, r, st, cfg, u, next)
+			return
+		} else if !errors.Is(lookupErr, store.ErrNotFound) {
+			slog.Error("google sign-in: identity lookup", "err", lookupErr)
+			redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "failed")
+			return
+		}
+		// Google warns that a verified address outside Gmail or a hosted Google
+		// domain may later change owners. Do not use such an address to attach a
+		// new identity to an existing password account.
+		if !identity.EmailAuthoritative {
+			if _, emailErr := st.GetUserByEmail(r.Context(), identity.Email); emailErr == nil {
+				redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "account_conflict")
+				return
+			} else if !errors.Is(emailErr, store.ErrNotFound) {
+				redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "failed")
+				return
+			}
+		}
+		name := identity.Name
+		if name == "" {
+			name = strings.Split(identity.Email, "@")[0]
+		}
+		slug, err := uniqueSlug(r.Context(), st, name)
+		if err != nil {
+			redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "failed")
+			return
+		}
+		randomPassword, _, err := auth.NewRefreshToken()
+		if err != nil {
+			redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "failed")
+			return
+		}
+		passwordHash, err := auth.HashPassword(randomPassword)
+		if err != nil {
+			redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "failed")
+			return
+		}
+		var avatar *string
+		if identity.Picture != "" {
+			avatar = &identity.Picture
+		}
+		u, err := st.CreateOrLinkOAuthUser(r.Context(), "google", identity.Subject, identity.Email, name, slug, passwordHash, avatar)
+		if errors.Is(err, store.ErrConflict) {
+			// A simultaneous callback may have won the unique identity race.
+			u, err = st.GetUserByOAuthIdentity(r.Context(), "google", identity.Subject)
+		}
+		if err != nil {
+			slog.Error("google sign-in: resolve user", "err", err)
+			redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "account_conflict")
+			return
+		}
+		finishGoogleSignIn(w, r, st, cfg, u, next)
+	}
+}
+
+func finishGoogleSignIn(w http.ResponseWriter, r *http.Request, st store.Storer, cfg AuthConfig, u *store.User, next string) {
+	if _, err := issueTokens(w, r, st, cfg, u); err != nil {
+		slog.Error("google sign-in: issue session", "err", err)
+		redirectGoogleAuth(w, r, cfg.PublicAppURL, "/login", "failed")
+		return
+	}
+	destination := "/auth/google/callback"
+	if next != "" {
+		destination += "?next=" + url.QueryEscape(next)
+	}
+	http.Redirect(w, r, strings.TrimRight(cfg.PublicAppURL, "/")+destination, http.StatusFound)
+}
+
+func safeAuthReturnPath(next string) string {
+	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.Contains(next, "\\") {
+		return ""
+	}
+	switch strings.Split(next, "?")[0] {
+	case "/login", "/register", "/auth/google/callback":
+		return ""
+	}
+	return next
+}
+
+func setGoogleOAuthCookie(w http.ResponseWriter, name, value string, secure bool) {
+	http.SetCookie(w, &http.Cookie{Name: name, Value: value, Path: googleOAuthCookiePath, HttpOnly: true,
+		Secure: secure, SameSite: http.SameSiteLaxMode, MaxAge: int(googleOAuthTTL.Seconds())})
+}
+
+func clearGoogleOAuthCookies(w http.ResponseWriter, secure bool) {
+	for _, name := range []string{"sessionly_google_state", "sessionly_google_pkce"} {
+		http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: googleOAuthCookiePath, HttpOnly: true,
+			Secure: secure, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	}
+}
+
+func redirectGoogleAuth(w http.ResponseWriter, r *http.Request, appURL, path, reason string) {
+	destination := strings.TrimRight(appURL, "/") + path
+	if reason != "" {
+		destination += "?oauth=" + url.QueryEscape(reason)
+	}
+	http.Redirect(w, r, destination, http.StatusFound)
 }
 
 func authRoute(cfg AuthConfig, method string, lim *RateLimiter, next http.HandlerFunc) http.HandlerFunc {
@@ -283,18 +468,30 @@ func handleUpdateMe(st store.Storer) http.HandlerFunc {
 }
 
 func writeTokens(w http.ResponseWriter, r *http.Request, st store.Storer, cfg AuthConfig, u *store.User, oldHash ...string) {
-	accessToken, err := auth.SignAccessToken(u.ID, cfg.JWTSecret, cfg.AccessTokenTTL)
+	resp, err := issueTokens(w, r, st, cfg, u, oldHash...)
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	if err != nil {
-		slog.Error("auth: sign access token", "err", err)
+		slog.Error("auth: issue tokens", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func issueTokens(w http.ResponseWriter, r *http.Request, st store.Storer, cfg AuthConfig, u *store.User, oldHash ...string) (tokenResponse, error) {
+	accessToken, err := auth.SignAccessToken(u.ID, cfg.JWTSecret, cfg.AccessTokenTTL)
+	if err != nil {
+		return tokenResponse{}, fmt.Errorf("sign access token: %w", err)
 	}
 
 	rawRT, hashRT, err := auth.NewRefreshToken()
 	if err != nil {
-		slog.Error("auth: new refresh token", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return tokenResponse{}, fmt.Errorf("new refresh token: %w", err)
 	}
 
 	if len(oldHash) > 0 {
@@ -303,13 +500,10 @@ func writeTokens(w http.ResponseWriter, r *http.Request, st store.Storer, cfg Au
 		err = st.CreateRefreshToken(r.Context(), u.ID, hashRT, time.Now().Add(refreshTokenTTL))
 	}
 	if errors.Is(err, store.ErrNotFound) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+		return tokenResponse{}, store.ErrNotFound
 	}
 	if err != nil {
-		slog.Error("auth: store refresh token", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+		return tokenResponse{}, fmt.Errorf("store refresh token: %w", err)
 	}
 
 	http.SetCookie(w, &http.Cookie{
@@ -330,9 +524,7 @@ func writeTokens(w http.ResponseWriter, r *http.Request, st store.Storer, cfg Au
 		MaxAge:   int(refreshTokenTTL.Seconds()),
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(tokenResponse{AccessToken: accessToken, User: toUserResponse(u)})
+	return tokenResponse{AccessToken: accessToken, User: toUserResponse(u)}, nil
 }
 
 func clearRefreshCookie(w http.ResponseWriter, secure bool) {
