@@ -166,6 +166,11 @@ type cancelBookingRequest struct {
 	Reason string `json:"reason"`
 }
 
+type rescheduleBookingRequest struct {
+	StartsAt  string `json:"startsAt"`
+	HoldToken string `json:"holdToken"`
+}
+
 type bookingListResponse struct {
 	Bookings []bookingDTO `json:"bookings"`
 }
@@ -422,6 +427,7 @@ func sendBookingEmails(ctx context.Context, deps BookingDeps, b *store.Booking, 
 		StartsAt:     b.StartsAt,
 		EndsAt:       b.EndsAt,
 		MeetCode:     b.MeetCode,
+		Sequence:     b.Revision,
 		CancelToken:  b.CancelToken,
 		PublicAppURL: deps.PublicAppURL,
 	}
@@ -444,6 +450,10 @@ func sendBookingEmails(ctx context.Context, deps BookingDeps, b *store.Booking, 
 // error when the lookup itself failed, and nil when the slot is clear or no
 // calendar is connected.
 func checkExternalBusyConflict(ctx context.Context, deps BookingDeps, hostID string, event store.EventType, startsAt, endsAt time.Time) error {
+	return checkExternalBusyConflictExcept(ctx, deps, hostID, event, startsAt, endsAt, nil)
+}
+
+func checkExternalBusyConflictExcept(ctx context.Context, deps BookingDeps, hostID string, event store.EventType, startsAt, endsAt time.Time, current *store.Booking) error {
 	if deps.Busy == nil {
 		return nil
 	}
@@ -454,13 +464,18 @@ func checkExternalBusyConflict(ctx context.Context, deps BookingDeps, hostID str
 	if err != nil {
 		return err
 	}
+	if current != nil {
+		busy = busyWithout(busy, current.StartsAt, current.EndsAt)
+	}
 	if isSlotConflicted(startsAt, endsAt.Sub(startsAt), bufferBefore, bufferAfter, busyAsBookings(busy)) {
 		return errSlotTaken
 	}
 	return nil
 }
 
-// syncBookingToCalendar mirrors a confirmed booking into the host's calendar.
+// syncBookingToCalendar mirrors a confirmed booking into the host's calendar,
+// creating the event or moving an existing one when the booking was
+// rescheduled.
 // Synchronous by design: CLAUDE.md forbids fire-and-forget goroutines, and the
 // same reasoning as sendBookingEmails applies — a bounded call on the request
 // path is easier to reason about than a background worker whose failures
@@ -471,7 +486,7 @@ func syncBookingToCalendar(ctx context.Context, deps BookingDeps, b *store.Booki
 	}
 	syncCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	deps.CalendarSync.SyncBookingCreated(syncCtx, calendar.BookingEvent{
+	deps.CalendarSync.SyncBooking(syncCtx, calendar.BookingEvent{
 		BookingID:    b.ID,
 		HostID:       host.ID,
 		HostTimezone: host.Timezone,
@@ -557,12 +572,7 @@ func handleGuestCancelBooking(st store.Storer, deps BookingDeps, code string) ht
 			WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
 			return
 		}
-		// Magic-link auth: the cancel token from the confirmation email must
-		// match. Constant-time compare to avoid timing leaks on token shape.
-		// 404 (not 401/403) so an attacker probing meet codes can't tell
-		// "valid code, wrong token" from "no such booking".
-		token := r.URL.Query().Get("t")
-		if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(b.CancelToken)) != 1 {
+		if !validGuestBookingToken(r, b) {
 			WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
 			return
 		}
@@ -589,6 +599,153 @@ func handleGuestCancelBooking(st store.Storer, deps BookingDeps, code string) ht
 		unsyncBookingFromCalendar(r.Context(), deps, b)
 		slog.Info("bookings: guest cancelled", "booking_id", b.ID, "meet_code", code)
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func handleGuestRescheduleBooking(st store.Storer, deps BookingDeps, code string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b, err := st.GetBookingByMeetCode(r.Context(), code)
+		if err != nil || !validGuestBookingToken(r, b) {
+			WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
+			return
+		}
+		// Same gate the confirmation page shows the Reschedule button behind:
+		// once the room has opened, both parties may already be waiting, and
+		// moving the booking under them is worse than making them cancel.
+		if b.Status != "confirmed" ||
+			BookingRoomAccessFor(*b, time.Now().UTC(), deps.RoomWindow).Status != "too_early" {
+			WriteError(w, http.StatusConflict, "BOOKING_NOT_ACTIVE", "this booking can no longer be rescheduled")
+			return
+		}
+		var req rescheduleBookingRequest
+		if err := BindJSON(r, &req); err != nil {
+			WriteFieldError(w, http.StatusBadRequest, err)
+			return
+		}
+		startsAt, ferr := ValidateRFC3339Future("startsAt", req.StartsAt, time.Minute)
+		if ferr != nil {
+			WriteFieldError(w, http.StatusBadRequest, ferr)
+			return
+		}
+		host, herr := st.GetUserByID(r.Context(), b.HostID)
+		event, eerr := st.GetEventType(r.Context(), b.HostID, b.EventTypeID)
+		if isLookupFailure(herr) || isLookupFailure(eerr) {
+			slog.Error("bookings: guest reschedule lookup", "host_err", herr, "event_err", eerr, "booking_id", b.ID)
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not reschedule booking")
+			return
+		}
+		if herr != nil || eerr != nil || !event.IsActive {
+			WriteError(w, http.StatusConflict, "EVENT_INACTIVE", "this session can no longer be rescheduled")
+			return
+		}
+		endsAt := startsAt.Add(time.Duration(event.DurationMin) * time.Minute)
+		if !enforceBookingAvailability(w, r, st, *event, startsAt) {
+			return
+		}
+		// The hold is advisory, as it is on create: it lets the guest keep the
+		// slot they picked while they look at it. An expired or foreign token
+		// is simply not honoured, because rejecting it would strand a guest
+		// who sat on the page past the five-minute TTL with an error that
+		// re-picking the same time cannot clear. Double-booking is prevented
+		// by the conflict checks below and by the overlap check inside
+		// RescheduleBooking's transaction, not by the hold.
+		holdToken := ownHoldToken(r.Context(), st, req.HoldToken, *b, startsAt.UTC(), endsAt.UTC())
+		if cerr := checkBookingConflictExcept(r.Context(), st, *event, startsAt.UTC(), endsAt.UTC(), b.ID); cerr != nil {
+			if errors.Is(cerr, errSlotTaken) {
+				WriteError(w, http.StatusConflict, "SLOT_TAKEN", "this slot is no longer available")
+				return
+			}
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not reschedule booking")
+			return
+		}
+		if cerr := checkHoldConflict(r.Context(), st, host.ID, *event, startsAt.UTC(), endsAt.UTC(), holdToken); cerr != nil {
+			if errors.Is(cerr, errSlotTaken) {
+				WriteError(w, http.StatusConflict, "SLOT_TAKEN", "this slot is being booked by someone else")
+				return
+			}
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not reschedule booking")
+			return
+		}
+		if busyErr := checkExternalBusyConflictExcept(r.Context(), deps, host.ID, *event, startsAt.UTC(), endsAt.UTC(), b); busyErr != nil {
+			if errors.Is(busyErr, errSlotTaken) {
+				WriteError(w, http.StatusConflict, "SLOT_TAKEN", "this slot is no longer available")
+				return
+			}
+			metrics.CalendarBusyDegraded.Inc()
+		}
+		updated, err := st.RescheduleBooking(r.Context(), b.ID, startsAt.UTC(), endsAt.UTC(), holdToken)
+		if err != nil {
+			if errors.Is(err, store.ErrSlotTaken) {
+				WriteError(w, http.StatusConflict, "SLOT_TAKEN", "this slot is no longer available")
+				return
+			}
+			if errors.Is(err, store.ErrConflict) {
+				WriteError(w, http.StatusConflict, "BOOKING_NOT_ACTIVE", "this booking can no longer be rescheduled")
+				return
+			}
+			slog.Error("bookings: guest reschedule", "err", err, "booking_id", b.ID)
+			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not reschedule booking")
+			return
+		}
+		sendRescheduleEmails(r.Context(), deps, updated, event, host)
+		syncBookingToCalendar(r.Context(), deps, updated, event, host)
+		slog.Info("bookings: guest rescheduled", "booking_id", b.ID, "starts_at", updated.StartsAt)
+		WriteJSON(w, http.StatusOK, toBookingDTOWithWindow(*updated, event, host, deps.RoomWindow))
+	}
+}
+
+// isLookupFailure separates "the row is gone" from "the database is having a
+// bad moment". Only the first is a 4xx the guest can act on.
+func isLookupFailure(err error) bool {
+	return err != nil && !errors.Is(err, store.ErrNotFound)
+}
+
+// ownHoldToken returns the token only when it names a live hold this guest
+// placed on exactly the slot they are asking for. Anything else yields "",
+// which makes the hold invisible to the rest of the flow rather than fatal.
+func ownHoldToken(ctx context.Context, st store.Storer, token string, b store.Booking, startsAt, endsAt time.Time) string {
+	if token == "" {
+		return ""
+	}
+	hold, err := st.GetSlotHoldByToken(ctx, token)
+	if err != nil || hold.ExpiresAt.Before(time.Now().UTC()) || hold.HostID != b.HostID ||
+		hold.EventTypeID != b.EventTypeID || !hold.StartsAt.Equal(startsAt) || !hold.EndsAt.Equal(endsAt) {
+		return ""
+	}
+	return token
+}
+
+// validGuestBookingToken is the magic-link check every guest-facing booking
+// route shares: the cancel token from the confirmation email must match, in
+// constant time so the comparison leaks nothing about the token's shape.
+// Callers answer a mismatch with 404 rather than 401/403, so an attacker
+// probing meet codes cannot tell "valid code, wrong token" from "no such
+// booking".
+func validGuestBookingToken(r *http.Request, b *store.Booking) bool {
+	if b == nil {
+		return false
+	}
+	token := r.URL.Query().Get("t")
+	return token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(b.CancelToken)) == 1
+}
+
+func sendRescheduleEmails(ctx context.Context, deps BookingDeps, b *store.Booking, event *store.EventType, host *store.User) {
+	if deps.DurableNotifications || deps.Mailer == nil || event == nil || host == nil {
+		return
+	}
+	in := email.BookingInput{
+		GuestName: b.GuestName, GuestEmail: b.GuestEmail, HostName: host.Name, HostEmail: host.Email,
+		HostTimezone: host.Timezone, EventTitle: event.Title, EventMinutes: event.DurationMin,
+		StartsAt: b.StartsAt, EndsAt: b.EndsAt, MeetCode: b.MeetCode, CancelToken: b.CancelToken,
+		Sequence: b.Revision, PublicAppURL: deps.PublicAppURL,
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	if err := deps.Mailer.Send(sendCtx, email.RenderBookingRescheduled(in, "", false)); err != nil {
+		slog.Warn("bookings: guest reschedule email failed", "err", err, "booking_id", b.ID)
+	}
+	if err := deps.Mailer.Send(sendCtx, email.RenderBookingRescheduled(in, "", true)); err != nil {
+		slog.Warn("bookings: host reschedule email failed", "err", err, "booking_id", b.ID)
 	}
 }
 

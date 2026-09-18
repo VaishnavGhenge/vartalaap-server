@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,9 +33,17 @@ type OutboxJob struct {
 }
 
 func enqueueBookingNotifications(ctx context.Context, tx pgx.Tx, b Booking, action string) error {
-	if action == "cancelled" {
+	if action == "cancelled" || strings.HasPrefix(action, "rescheduled:") {
+		if _, err := tx.Exec(ctx, `UPDATE booking_outbox
+			SET completed_at=now(), lease_until=NULL, lease_token=NULL, last_error=NULL,
+				payload='{}'::jsonb, delivery_payload=NULL
+			WHERE booking_id=$1 AND completed_at IS NULL AND action LIKE 'reminder:%'`, b.ID); err != nil {
+			return err
+		}
 		// Don't leave cancellation behind an hour-long create retry. The
-		// earlier job will re-read the booking and converge to cancelled.
+		// earlier job will re-read the booking and converge to the current
+		// state. Reschedules do the same so earlier lifecycle jobs cannot block
+		// the changed-time email behind a retry delay.
 		if _, err := tx.Exec(ctx, `UPDATE booking_outbox SET available_at=now()
 			WHERE booking_id=$1 AND completed_at IS NULL`, b.ID); err != nil {
 			return err
@@ -53,7 +62,34 @@ func enqueueBookingNotifications(ctx context.Context, tx pgx.Tx, b Booking, acti
 	_, err = tx.Exec(ctx, `INSERT INTO booking_outbox(booking_id, action, channel, payload)
 		SELECT $1, $2, channel, $3::jsonb FROM unnest(ARRAY['guest_email','host_email','calendar']) AS channel
 		ON CONFLICT (booking_id, action, channel) DO NOTHING`, b.ID, action, raw)
-	return err
+	if err != nil {
+		return err
+	}
+	if action == "created" || strings.HasPrefix(action, "rescheduled:") {
+		return enqueueBookingReminders(ctx, tx, b, raw)
+	}
+	return nil
+}
+
+func enqueueBookingReminders(ctx context.Context, tx pgx.Tx, b Booking, payload []byte) error {
+	for _, reminder := range []struct {
+		label  string
+		before time.Duration
+	}{
+		{label: "24h", before: 24 * time.Hour},
+		{label: "1h", before: time.Hour},
+	} {
+		action := fmt.Sprintf("reminder:%s:%d", reminder.label, b.StartsAt.UTC().UnixNano())
+		availableAt := b.StartsAt.UTC().Add(-reminder.before)
+		if _, err := tx.Exec(ctx, `INSERT INTO booking_outbox(booking_id, action, channel, payload, available_at)
+			SELECT $1, $2, channel, $3::jsonb, $4
+			FROM unnest(ARRAY['guest_email','host_email']) AS channel
+			WHERE $4 > now()
+			ON CONFLICT (booking_id, action, channel) DO NOTHING`, b.ID, action, payload, availableAt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ClaimOutboxJob(ctx context.Context) (*OutboxJob, error) {
@@ -111,7 +147,10 @@ func (s *Store) FinishOutboxJob(ctx context.Context, job OutboxJob, retryAt time
 func (s *Store) OutboxBacklog(ctx context.Context) (int64, float64, error) {
 	var count int64
 	var oldest float64
-	err := s.pool.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now()-min(created_at)),0)::float8
-		FROM booking_outbox WHERE completed_at IS NULL`).Scan(&count, &oldest)
+	err := s.pool.QueryRow(ctx, `SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now()-min(
+		CASE WHEN action LIKE 'reminder:%' AND attempts=0 THEN available_at ELSE created_at END
+	)),0)::float8
+		FROM booking_outbox WHERE completed_at IS NULL
+		AND (action NOT LIKE 'reminder:%' OR attempts > 0 OR available_at <= now())`).Scan(&count, &oldest)
 	return count, oldest, err
 }

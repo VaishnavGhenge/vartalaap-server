@@ -361,10 +361,11 @@ func (s *Service) BusyPeriods(ctx context.Context, hostID string, fromUTC, toUTC
 
 // ─── Writes ──────────────────────────────────────────────────────────────────
 
-// SyncBookingCreated mirrors a confirmed booking into the host's calendar.
-// Failures are returned to the durable worker and recorded on the connection.
-// They do not roll back the already-committed booking.
-func (s *Service) SyncBookingCreated(ctx context.Context, in BookingEvent) error {
+// SyncBooking makes the host's calendar match the booking: it creates the
+// mirrored event, or moves an existing one when the booking has been
+// rescheduled. Failures are returned to the durable worker and recorded on the
+// connection. They do not roll back the already-committed booking.
+func (s *Service) SyncBooking(ctx context.Context, in BookingEvent) error {
 	conn, err := s.connectionFor(ctx, in.HostID, "create")
 	if err != nil || conn == nil {
 		return err
@@ -374,8 +375,8 @@ func (s *Service) SyncBookingCreated(ctx context.Context, in BookingEvent) error
 		s.recordWriteFailure(ctx, conn, "create", in.BookingID, err)
 		return err
 	}
-	eventID, err := timedCall(ctx, "events.insert", func(ctx context.Context) (string, error) {
-		return s.client.InsertEvent(ctx, token, conn.CalendarID, gcal.Event{
+	eventID, err := timedCall(ctx, "events.upsert", func(ctx context.Context) (string, error) {
+		return s.client.UpsertEvent(ctx, token, conn.CalendarID, gcal.Event{
 			BookingID:   in.BookingID,
 			Summary:     in.EventTitle + " with " + in.GuestName,
 			Description: describeBooking(in),
@@ -397,7 +398,7 @@ func (s *Service) SyncBookingCreated(ctx context.Context, in BookingEvent) error
 		EventID:    eventID,
 		CalendarID: conn.CalendarID,
 	}); err != nil {
-		// Retrying the deterministic insert repairs this mapping without
+		// Retrying the deterministic upsert repairs this mapping without
 		// creating another Google event.
 		slog.Error("calendar: event created but mapping not saved",
 			"err", err, "booking_id", in.BookingID, "event_id", eventID)
@@ -572,7 +573,7 @@ type BusySource interface {
 
 // BookingSync returns delivery failures so the outbox can retry them.
 type BookingSync interface {
-	SyncBookingCreated(ctx context.Context, in BookingEvent) error
+	SyncBooking(ctx context.Context, in BookingEvent) error
 	SyncBookingCancelled(ctx context.Context, hostID, bookingID string) error
 }
 

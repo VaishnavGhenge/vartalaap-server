@@ -319,7 +319,7 @@ func bookingEvent() BookingEvent {
 	}
 }
 
-func TestSyncBookingCreatedStoresMapping(t *testing.T) {
+func TestSyncBookingStoresMapping(t *testing.T) {
 	st := &fakeStore{}
 	svc := newTestService(t, st, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
@@ -331,7 +331,7 @@ func TestSyncBookingCreatedStoresMapping(t *testing.T) {
 	}))
 	st.conn = liveConn(t, svc)
 
-	svc.SyncBookingCreated(context.Background(), bookingEvent())
+	svc.SyncBooking(context.Background(), bookingEvent())
 
 	if st.created == nil {
 		t.Fatal("mapping was not stored — cancellation could never find the event")
@@ -344,14 +344,14 @@ func TestSyncBookingCreatedStoresMapping(t *testing.T) {
 	}
 }
 
-func TestSyncBookingCreatedReturnsFailureForDurableRetry(t *testing.T) {
+func TestSyncBookingReturnsFailureForDurableRetry(t *testing.T) {
 	st := &fakeStore{}
 	svc := newTestService(t, st, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	st.conn = liveConn(t, svc)
 
-	if err := svc.SyncBookingCreated(context.Background(), bookingEvent()); err == nil {
+	if err := svc.SyncBooking(context.Background(), bookingEvent()); err == nil {
 		t.Fatal("worker must be told that delivery failed")
 	}
 
@@ -363,12 +363,12 @@ func TestSyncBookingCreatedReturnsFailureForDurableRetry(t *testing.T) {
 	}
 }
 
-func TestSyncBookingCreatedNoConnectionIsNoop(t *testing.T) {
+func TestSyncBookingNoConnectionIsNoop(t *testing.T) {
 	st := &fakeStore{}
 	svc := newTestService(t, st, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("Google must not be called without a connection")
 	}))
-	svc.SyncBookingCreated(context.Background(), bookingEvent())
+	svc.SyncBooking(context.Background(), bookingEvent())
 	if st.created != nil {
 		t.Fatal("mapping stored without a connection")
 	}

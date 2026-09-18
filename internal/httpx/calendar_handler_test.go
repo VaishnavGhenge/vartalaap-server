@@ -21,8 +21,12 @@ import (
 // fakeBusy stands in for a connected Google Calendar. `err` simulates Google
 // being unreachable, which is the case the degradation logic exists for.
 type fakeBusy struct {
-	mu       sync.Mutex
-	busy     []calendar.Interval
+	mu   sync.Mutex
+	busy []calendar.Interval
+	// clip mirrors what Google actually returns: busy windows trimmed to the
+	// requested range, with anything outside it dropped. Tests that care how a
+	// window's bounds arrive must set this; the others do not.
+	clip     bool
 	err      error
 	calls    int
 	lastFrom time.Time
@@ -37,7 +41,23 @@ func (f *fakeBusy) BusyPeriods(_ context.Context, _ string, fromUTC, toUTC time.
 	if f.err != nil {
 		return nil, f.err
 	}
-	return f.busy, nil
+	if !f.clip {
+		return f.busy, nil
+	}
+	out := make([]calendar.Interval, 0, len(f.busy))
+	for _, interval := range f.busy {
+		if !interval.End.After(fromUTC) || !interval.Start.Before(toUTC) {
+			continue
+		}
+		if interval.Start.Before(fromUTC) {
+			interval.Start = fromUTC
+		}
+		if interval.End.After(toUTC) {
+			interval.End = toUTC
+		}
+		out = append(out, interval)
+	}
+	return out, nil
 }
 
 func (f *fakeBusy) Calls() int {
@@ -52,7 +72,7 @@ type fakeSync struct {
 	cancelled []string
 }
 
-func (f *fakeSync) SyncBookingCreated(_ context.Context, in calendar.BookingEvent) error {
+func (f *fakeSync) SyncBooking(_ context.Context, in calendar.BookingEvent) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.created = append(f.created, in)

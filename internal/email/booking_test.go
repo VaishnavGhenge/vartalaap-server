@@ -59,6 +59,47 @@ func TestRenderBookingNotification_GoesToHost(t *testing.T) {
 	}
 }
 
+func TestRenderBookingRescheduled_IsClearAndKeepsManageLink(t *testing.T) {
+	in := sampleInput()
+	in.CancelToken = "manage-token"
+	guest := RenderBookingRescheduled(in, "Sessionly <no-reply@sessionly.test>", false)
+	if guest.Subject != "Rescheduled: Intro call with Alex Host" || !strings.Contains(guest.TextBody, "has been rescheduled") {
+		t.Fatalf("guest update is unclear: subject=%q body=%q", guest.Subject, guest.TextBody)
+	}
+	if !strings.Contains(guest.TextBody, "https://getsessionly.com/m/i55-iemv-qzx?t=manage-token") {
+		t.Fatalf("guest update lost manage link: %q", guest.TextBody)
+	}
+	host := RenderBookingRescheduled(in, "Sessionly <no-reply@sessionly.test>", true)
+	if host.Subject != "Rescheduled: Intro call with Pat Guest" || host.To[0] != `"Alex Host" <alex@example.com>` {
+		t.Fatalf("host update is wrong: %+v", host)
+	}
+}
+
+func TestRenderBookingReminder_HasRightRecipientAndLinks(t *testing.T) {
+	in := sampleInput()
+	in.CancelToken = "manage-token"
+	guest := RenderBookingReminder(in, "Sessionly <no-reply@sessionly.test>", false, time.Hour)
+	if guest.Subject != "Reminder: Intro call in 1 hour" || guest.To[0] != `"Pat Guest" <pat@example.com>` {
+		t.Fatalf("guest reminder headers are wrong: %+v", guest)
+	}
+	for _, want := range []string{
+		"starts in 1 hour",
+		"https://getsessionly.com/room/i55-iemv-qzx?gt=manage-token",
+		"https://getsessionly.com/m/i55-iemv-qzx?t=manage-token",
+	} {
+		if !strings.Contains(guest.TextBody, want) {
+			t.Fatalf("guest reminder missing %q: %q", want, guest.TextBody)
+		}
+	}
+	host := RenderBookingReminder(in, "Sessionly <no-reply@sessionly.test>", true, 24*time.Hour)
+	if host.Subject != "Reminder: Intro call in 24 hours" || host.To[0] != `"Alex Host" <alex@example.com>` {
+		t.Fatalf("host reminder headers are wrong: %+v", host)
+	}
+	if strings.Contains(host.TextBody, "manage-token") || !strings.Contains(host.TextBody, "With:  Pat Guest") {
+		t.Fatalf("host reminder leaked guest authority or lost guest context: %q", host.TextBody)
+	}
+}
+
 func TestBuildICS_HasRequiredHeaders(t *testing.T) {
 	body := string(BuildICS(sampleInput(), "https://getsessionly.com/room/i55-iemv-qzx"))
 	required := []string{
@@ -67,6 +108,7 @@ func TestBuildICS_HasRequiredHeaders(t *testing.T) {
 		"BEGIN:VEVENT",
 		"END:VEVENT",
 		"UID:i55-iemv-qzx@sessionly",
+		"SEQUENCE:0",
 		"DTSTART:20260518T130000Z",
 		"DTEND:20260518T133000Z",
 		"SUMMARY:Intro call",
@@ -77,6 +119,15 @@ func TestBuildICS_HasRequiredHeaders(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("ICS missing %q. Full body:\n%s", want, body)
 		}
+	}
+}
+
+func TestBuildICS_UsesBookingSequence(t *testing.T) {
+	in := sampleInput()
+	in.Sequence = 2
+	body := string(BuildICS(in, "https://getsessionly.com/room/i55-iemv-qzx"))
+	if !strings.Contains(body, "\r\nSEQUENCE:2\r\n") {
+		t.Fatalf("ICS missing reschedule sequence. Full body:\n%s", body)
 	}
 }
 

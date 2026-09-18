@@ -72,8 +72,7 @@ func SlotHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, deps Book
 		}
 		switch r.Method {
 		case http.MethodOptions:
-			// Preflight must advertise DELETE too — the guest cancel link uses it.
-			bookingsRoute(cfg, "GET, DELETE", nil,
+			bookingsRoute(cfg, "GET, PATCH, DELETE", nil,
 				func(w http.ResponseWriter, r *http.Request) {})(w, r)
 		case http.MethodGet:
 			bookingsRoute(cfg, http.MethodGet, lim, handleGetBookingByMeetCode(st, deps, code))(w, r)
@@ -82,6 +81,9 @@ func SlotHandlers(mux *http.ServeMux, st store.Storer, cfg AuthConfig, deps Book
 			// public mutation we expose under a meet-code-based auth model.
 			bookingsRoute(cfg, http.MethodDelete, cancelLim,
 				handleGuestCancelBooking(st, deps, code))(w, r)
+		case http.MethodPatch:
+			bookingsRoute(cfg, http.MethodPatch, cancelLim,
+				handleGuestRescheduleBooking(st, deps, code))(w, r)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -281,11 +283,24 @@ func handleListSlots(st store.Storer, deps BookingDeps, hostSlug, eventSlug stri
 			})
 			return
 		}
+		var rescheduleBooking *store.Booking
+		if code := q.Get("reschedule"); code != "" {
+			candidate, berr := st.GetBookingByMeetCode(r.Context(), code)
+			if berr != nil || !validGuestBookingToken(r, candidate) ||
+				candidate.Status != "confirmed" || candidate.HostID != host.ID || candidate.EventTypeID != event.ID {
+				WriteError(w, http.StatusNotFound, "NOT_FOUND", "not found")
+				return
+			}
+			rescheduleBooking = candidate
+		}
 		bookings, err := st.ListBookingsForHostInRange(r.Context(), host.ID, fromUTC, toUTC)
 		if err != nil {
 			slog.Error("slots: list bookings", "err", err, "event_id", event.ID)
 			WriteError(w, http.StatusInternalServerError, "INTERNAL", "could not load slots")
 			return
+		}
+		if rescheduleBooking != nil {
+			bookings = bookingsExcept(bookings, rescheduleBooking.ID)
 		}
 		// Active holds (any event type on this host) — treat them as if they
 		// were bookings so a slot in-progress disappears from every picker
@@ -311,6 +326,9 @@ func handleListSlots(st store.Storer, deps BookingDeps, hostSlug, eventSlug stri
 				metrics.CalendarBusyDegraded.Inc()
 				degraded = true
 			} else {
+				if rescheduleBooking != nil {
+					busy = busyWithout(busy, rescheduleBooking.StartsAt, rescheduleBooking.EndsAt)
+				}
 				blockers = append(blockers, busyAsBookings(busy)...)
 			}
 		}
@@ -330,6 +348,60 @@ func handleListSlots(st store.Storer, deps BookingDeps, hostSlug, eventSlug stri
 		}
 		WriteJSON(w, http.StatusOK, out)
 	}
+}
+
+func bookingsExcept(bookings []store.Booking, id string) []store.Booking {
+	out := make([]store.Booking, 0, len(bookings))
+	for _, booking := range bookings {
+		if booking.ID != id {
+			out = append(out, booking)
+		}
+	}
+	return out
+}
+
+// busyWithout subtracts [startsAt, endsAt) from the host's external busy
+// windows, so a guest rescheduling their own booking is not blocked by its own
+// mirrored calendar entry.
+//
+// Subtraction, not an equality match on the interval's bounds: freebusy merges
+// overlapping entries and clips them to the requested window, so the interval
+// covering this booking usually arrives with bounds that are not the booking's.
+// Matching on equality silently failed for the commonest reschedule there is,
+// nudging a call by fifteen minutes, because the conflict check queries a
+// window that clips the booking's own interval.
+//
+// The trade: a host event that genuinely overlaps the old slot is also cleared
+// for that window. Freebusy gives us no event IDs, so the two cannot be told
+// apart, and the booking and hold checks still cover double-booking.
+func busyWithout(busy []calendar.Interval, startsAt, endsAt time.Time) []calendar.Interval {
+	out := make([]calendar.Interval, 0, len(busy))
+	for _, interval := range busy {
+		if !interval.Start.Before(startsAt) && !interval.End.After(endsAt) {
+			continue
+		}
+		if interval.Start.Before(startsAt) {
+			out = append(out, calendar.Interval{Start: interval.Start, End: earlier(interval.End, startsAt)})
+		}
+		if interval.End.After(endsAt) {
+			out = append(out, calendar.Interval{Start: later(interval.Start, endsAt), End: interval.End})
+		}
+	}
+	return out
+}
+
+func earlier(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+func later(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 // parseSlotsRange validates the from/to date-only query strings and returns
@@ -514,12 +586,19 @@ func isSlotConflicted(slotUTC time.Time, duration, bufferBefore, bufferAfter tim
 // Returns nil when the slot is clear and a non-nil sentinel-equivalent error
 // otherwise.
 func checkBookingConflict(ctx context.Context, st store.Storer, event store.EventType, startsAt, endsAt time.Time) error {
+	return checkBookingConflictExcept(ctx, st, event, startsAt, endsAt, "")
+}
+
+func checkBookingConflictExcept(ctx context.Context, st store.Storer, event store.EventType, startsAt, endsAt time.Time, bookingID string) error {
 	bufferBefore := time.Duration(event.BufferBeforeMin) * time.Minute
 	bufferAfter := time.Duration(event.BufferMin) * time.Minute
 	bookings, err := st.ListBookingsForHostInRange(ctx, event.HostID,
 		startsAt.Add(-bufferBefore), endsAt.Add(bufferAfter))
 	if err != nil {
 		return err
+	}
+	if bookingID != "" {
+		bookings = bookingsExcept(bookings, bookingID)
 	}
 	if isSlotConflicted(startsAt, endsAt.Sub(startsAt), bufferBefore, bufferAfter, bookings) {
 		return errSlotTaken

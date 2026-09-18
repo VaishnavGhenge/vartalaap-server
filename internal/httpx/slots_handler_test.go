@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vaishnavghenge/vartalaap-server/internal/calendar"
 	"github.com/vaishnavghenge/vartalaap-server/internal/email"
 	"github.com/vaishnavghenge/vartalaap-server/internal/store"
 )
@@ -59,6 +60,8 @@ func dispatchPublicWithDeps(st store.Storer, deps BookingDeps, w http.ResponseWr
 			handleGetBookingByMeetCode(st, deps, code)(w, r)
 		case http.MethodDelete:
 			handleGuestCancelBooking(st, deps, code)(w, r)
+		case http.MethodPatch:
+			handleGuestRescheduleBooking(st, deps, code)(w, r)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -672,6 +675,258 @@ func TestGuestCancel_Idempotent(t *testing.T) {
 			t.Fatalf("cancel attempt %d: want 204, got %d", i, rec.Code)
 		}
 	}
+}
+
+func TestGuestReschedule_HappyPathPreservesMeeting(t *testing.T) {
+	st := newMemStore()
+	b, host, event, _ := seedBooking(t, st)
+	newStart := b.StartsAt.Add(24 * time.Hour)
+	if _, err := st.ReplaceAvailability(context.Background(), host.ID, []store.AvailabilityRule{
+		rule(int(newStart.Weekday()), "00:00", "23:59", "UTC"),
+	}); err != nil {
+		t.Fatalf("seed availability: %v", err)
+	}
+	hold, err := st.CreateSlotHold(context.Background(), store.SlotHold{
+		HostID: host.ID, EventTypeID: event.ID, StartsAt: newStart, EndsAt: newStart.Add(30 * time.Minute),
+		Token: "reschedule-hold", ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("seed hold: %v", err)
+	}
+	mailer := &recordingMailer{}
+	body := fmt.Sprintf(`{"startsAt":%q,"holdToken":%q}`, newStart.Format(time.RFC3339), hold.Token)
+	rec := httptest.NewRecorder()
+	dispatchPublicWithDeps(st, BookingDeps{Mailer: mailer, PublicAppURL: "https://app.test"}, rec,
+		publicReqWithBody(http.MethodPatch, "/m/"+b.MeetCode+"?t="+b.CancelToken, body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := st.GetBookingByID(context.Background(), b.ID)
+	if !got.StartsAt.Equal(newStart) || got.MeetCode != b.MeetCode || got.CancelToken != b.CancelToken {
+		t.Fatalf("reschedule must only move time: before=%+v after=%+v", b, got)
+	}
+	if _, err := st.GetSlotHoldByToken(context.Background(), hold.Token); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("hold should be consumed, got %v", err)
+	}
+	msgs := mailer.Messages()
+	if len(msgs) != 2 || !strings.HasPrefix(msgs[0].Subject, "Rescheduled:") || !strings.HasPrefix(msgs[1].Subject, "Rescheduled:") {
+		t.Fatalf("guest and host need updated emails, got %+v", msgs)
+	}
+}
+
+// The guest holds a live reservation on the target slot and is still refused,
+// because someone else's booking is already there. Seeding a valid hold is the
+// point: with an expired one the request stops at the hold check and never
+// reaches the conflict check this test exists for.
+func TestGuestReschedule_TakenSlotKeepsOriginalBooking(t *testing.T) {
+	st := newMemStore()
+	b, host, event, _ := seedBooking(t, st)
+	newStart := b.StartsAt.Add(24 * time.Hour)
+	if _, err := st.CreateBooking(context.Background(), store.Booking{
+		EventTypeID: event.ID, HostID: host.ID, GuestName: "Other", GuestEmail: "other@example.com",
+		StartsAt: newStart, EndsAt: newStart.Add(30 * time.Minute), MeetCode: "other-room", Status: "confirmed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hold, err := st.CreateSlotHold(context.Background(), store.SlotHold{
+		HostID: host.ID, EventTypeID: event.ID, StartsAt: newStart, EndsAt: newStart.Add(30 * time.Minute),
+		Token: "live-hold", ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	dispatchPublicWithDeps(st, BookingDeps{}, rec, publicReqWithBody(http.MethodPatch,
+		"/m/"+b.MeetCode+"?t="+b.CancelToken,
+		fmt.Sprintf(`{"startsAt":%q,"holdToken":%q}`, newStart.Format(time.RFC3339), hold.Token)))
+	if rec.Code != http.StatusConflict || errorCode(t, rec) != "SLOT_TAKEN" {
+		t.Fatalf("want 409 SLOT_TAKEN, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := st.GetBookingByID(context.Background(), b.ID)
+	if !got.StartsAt.Equal(b.StartsAt) || got.Status != "confirmed" {
+		t.Fatalf("failed reschedule changed original booking: before=%+v after=%+v", b, got)
+	}
+}
+
+// The hold is a courtesy, not a gate. A guest who left the page open past the
+// five-minute TTL must still be able to move their booking: the alternative is
+// an error that re-picking the same time cannot clear, because the client
+// still holds the dead token and will not re-reserve a slot it thinks it has.
+func TestGuestReschedule_ExpiredHoldStillMoves(t *testing.T) {
+	st := newMemStore()
+	b, host, event, _ := seedBooking(t, st)
+	newStart := b.StartsAt.Add(24 * time.Hour)
+	hold, err := st.CreateSlotHold(context.Background(), store.SlotHold{
+		HostID: host.ID, EventTypeID: event.ID, StartsAt: newStart, EndsAt: newStart.Add(30 * time.Minute),
+		Token: "stale-hold", ExpiresAt: time.Now().UTC().Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	dispatchPublicWithDeps(st, BookingDeps{}, rec, publicReqWithBody(http.MethodPatch,
+		"/m/"+b.MeetCode+"?t="+b.CancelToken,
+		fmt.Sprintf(`{"startsAt":%q,"holdToken":%q}`, newStart.Format(time.RFC3339), hold.Token)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := st.GetBookingByID(context.Background(), b.ID)
+	if !got.StartsAt.Equal(newStart) {
+		t.Fatalf("expired hold blocked the move: %v", got.StartsAt)
+	}
+}
+
+// The confirmation page only offers Reschedule while the room is still shut.
+// The API has to agree, or a stale manage link moves a call out from under two
+// people who are already in it.
+func TestGuestReschedule_RefusedOnceRoomOpens(t *testing.T) {
+	st := newMemStore()
+	_, host, event, _ := seedBooking(t, st)
+	soon := time.Now().UTC().Add(5 * time.Minute).Truncate(time.Minute)
+	imminent, err := st.CreateBooking(context.Background(), store.Booking{
+		EventTypeID: event.ID, HostID: host.ID, GuestName: "Pat", GuestEmail: "pat@example.com",
+		StartsAt: soon, EndsAt: soon.Add(30 * time.Minute), MeetCode: "open-room-01",
+		Status: "confirmed", CancelToken: "imminent-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newStart := soon.Add(48 * time.Hour)
+	rec := httptest.NewRecorder()
+	dispatchPublicWithDeps(st, BookingDeps{RoomWindow: BookingRoomWindow{OpenBefore: 10 * time.Minute}}, rec,
+		publicReqWithBody(http.MethodPatch, "/m/"+imminent.MeetCode+"?t="+imminent.CancelToken,
+			fmt.Sprintf(`{"startsAt":%q}`, newStart.Format(time.RFC3339))))
+	if rec.Code != http.StatusConflict || errorCode(t, rec) != "BOOKING_NOT_ACTIVE" {
+		t.Fatalf("want 409 BOOKING_NOT_ACTIVE, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := st.GetBookingByID(context.Background(), imminent.ID)
+	if !got.StartsAt.Equal(soon) {
+		t.Fatalf("open room was rescheduled anyway: %v", got.StartsAt)
+	}
+}
+
+// Freebusy clips busy windows to the range asked for, and the reschedule
+// conflict check asks about exactly the new slot. Shifting a booking by
+// fifteen minutes therefore sees its own mirrored event come back with bounds
+// that are not the booking's, which is why the overlap is subtracted rather
+// than matched on equality.
+func TestGuestReschedule_IgnoresOwnClippedBusyWindow(t *testing.T) {
+	st := newMemStore()
+	b, _, _, _ := seedBooking(t, st)
+	busy := &fakeBusy{clip: true, busy: []calendar.Interval{{Start: b.StartsAt, End: b.EndsAt}}}
+	newStart := b.StartsAt.Add(15 * time.Minute)
+	rec := httptest.NewRecorder()
+	dispatchPublicWithDeps(st, BookingDeps{Busy: busy}, rec,
+		publicReqWithBody(http.MethodPatch, "/m/"+b.MeetCode+"?t="+b.CancelToken,
+			fmt.Sprintf(`{"startsAt":%q}`, newStart.Format(time.RFC3339))))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nudging a booking must not collide with itself: %d %s", rec.Code, rec.Body.String())
+	}
+	got, _ := st.GetBookingByID(context.Background(), b.ID)
+	if !got.StartsAt.Equal(newStart) {
+		t.Fatalf("booking did not move: %v", got.StartsAt)
+	}
+}
+
+// A host event that really does sit on the new slot still has to block it:
+// subtracting the booking's own window must not blind the check entirely.
+func TestGuestReschedule_HonoursUnrelatedBusyWindow(t *testing.T) {
+	st := newMemStore()
+	b, _, _, _ := seedBooking(t, st)
+	newStart := b.StartsAt.Add(24 * time.Hour)
+	busy := &fakeBusy{clip: true, busy: []calendar.Interval{
+		{Start: b.StartsAt, End: b.EndsAt},
+		{Start: newStart, End: newStart.Add(30 * time.Minute)},
+	}}
+	rec := httptest.NewRecorder()
+	dispatchPublicWithDeps(st, BookingDeps{Busy: busy}, rec,
+		publicReqWithBody(http.MethodPatch, "/m/"+b.MeetCode+"?t="+b.CancelToken,
+			fmt.Sprintf(`{"startsAt":%q}`, newStart.Format(time.RFC3339))))
+	if rec.Code != http.StatusConflict || errorCode(t, rec) != "SLOT_TAKEN" {
+		t.Fatalf("want 409 SLOT_TAKEN, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRescheduleSlots_ExcludeCurrentBookingOnlyWithValidToken(t *testing.T) {
+	st := newMemStore()
+	b, host, event, _ := seedBooking(t, st)
+	day := b.StartsAt.UTC().Truncate(24 * time.Hour)
+	if _, err := st.ReplaceAvailability(context.Background(), host.ID, []store.AvailabilityRule{
+		rule(int(day.Weekday()), "00:00", "23:59", "UTC"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	base := fmt.Sprintf("/u/%s/%s/slots?from=%s&to=%s&reschedule=%s", host.Slug, event.Slug,
+		day.Format("2006-01-02"), day.AddDate(0, 0, 1).Format("2006-01-02"), b.MeetCode)
+	rec := httptest.NewRecorder()
+	dispatchPublic(st, rec, publicReq(http.MethodGet, base+"&t=wrong"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("wrong token must 404, got %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	dispatchPublic(st, rec, publicReq(http.MethodGet, base+"&t="+b.CancelToken))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid manage link should load reschedule slots: %d %s", rec.Code, rec.Body.String())
+	}
+	offered := decodeSlots(t, rec)
+
+	// Without the reschedule parameter the guest's own booking blocks its own
+	// window, so the same day offers strictly fewer times. That difference is
+	// the exclusion; asserting only the status code would pass with the
+	// filtering removed.
+	rec = httptest.NewRecorder()
+	dispatchPublic(st, rec, publicReq(http.MethodGet, fmt.Sprintf("/u/%s/%s/slots?from=%s&to=%s",
+		host.Slug, event.Slug, day.Format("2006-01-02"), day.AddDate(0, 0, 1).Format("2006-01-02"))))
+	plain := decodeSlots(t, rec)
+	if len(offered) <= len(plain) {
+		t.Fatalf("rescheduling must free the guest's own slot: %d offered vs %d plain", len(offered), len(plain))
+	}
+	for _, iso := range freedSlots(offered, plain) {
+		at, err := time.Parse(time.RFC3339, iso)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A freed slot is one the booking was overlapping, not one starting
+		// inside it: a 21:00 slot is blocked by a 21:03 booking.
+		ends := at.Add(time.Duration(event.DurationMin) * time.Minute)
+		if !at.Before(b.EndsAt) || !ends.After(b.StartsAt) {
+			t.Fatalf("freed slot %s does not overlap the booking being moved (%s-%s)", iso, b.StartsAt, b.EndsAt)
+		}
+	}
+}
+
+func decodeSlots(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var got slotsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode slots: %v", err)
+	}
+	return got.Slots
+}
+
+func freedSlots(offered, plain []string) []string {
+	seen := make(map[string]bool, len(plain))
+	for _, iso := range plain {
+		seen[iso] = true
+	}
+	var out []string
+	for _, iso := range offered {
+		if !seen[iso] {
+			out = append(out, iso)
+		}
+	}
+	return out
+}
+
+func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v (%s)", err, rec.Body.String())
+	}
+	return body.Code
 }
 
 func TestHostCancel_HappyPath(t *testing.T) {

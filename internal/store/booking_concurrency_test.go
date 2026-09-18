@@ -77,3 +77,55 @@ func TestConcurrentBookingsAcrossEventTypes(t *testing.T) {
 		t.Fatalf("cancelled slot should be reusable: %v", err)
 	}
 }
+
+func TestRescheduleBookingIsAtomicAndPreservesIdentity(t *testing.T) {
+	st := newStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	u, err := st.CreateUser(ctx, unique("move")+"@example.com", "Host", unique("move"), "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := st.CreateEventType(ctx, store.EventType{HostID: u.ID, Slug: "session", Title: "Session", DurationMin: 30, Currency: "usd", PaymentTiming: "upfront", IsActive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute)
+	original, err := st.CreateBooking(ctx, store.Booking{HostID: u.ID, EventTypeID: e.ID, GuestEmail: "guest@example.com", GuestName: "Guest", StartsAt: start, EndsAt: start.Add(30 * time.Minute), MeetCode: unique("stable-room"), CancelToken: "stable-token", Status: "confirmed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if original.Revision != 0 {
+		t.Fatalf("new booking revision = %d, want 0", original.Revision)
+	}
+	blocker, err := st.CreateBooking(ctx, store.Booking{HostID: u.ID, EventTypeID: e.ID, GuestEmail: "other@example.com", GuestName: "Other", StartsAt: start.Add(time.Hour), EndsAt: start.Add(90 * time.Minute), MeetCode: unique("blocker"), Status: "confirmed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RescheduleBooking(ctx, original.ID, blocker.StartsAt, blocker.EndsAt, ""); !errors.Is(err, store.ErrSlotTaken) {
+		t.Fatalf("occupied reschedule should fail with slot taken, got %v", err)
+	}
+	unchanged, _ := st.GetBookingByID(ctx, original.ID)
+	if !unchanged.StartsAt.Equal(original.StartsAt) || unchanged.Revision != 0 {
+		t.Fatalf("failed reschedule changed booking: before=%+v after=%+v", original, unchanged)
+	}
+	newStart := start.Add(2 * time.Hour)
+	moved, err := st.RescheduleBooking(ctx, original.ID, newStart, newStart.Add(30*time.Minute), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.ID != original.ID || moved.MeetCode != original.MeetCode || moved.CancelToken != original.CancelToken || !moved.StartsAt.Equal(newStart) {
+		t.Fatalf("reschedule changed booking identity: before=%+v after=%+v", original, moved)
+	}
+	if moved.Revision != 1 {
+		t.Fatalf("first reschedule revision = %d, want 1", moved.Revision)
+	}
+	secondStart := start.Add(3 * time.Hour)
+	movedAgain, err := st.RescheduleBooking(ctx, original.ID, secondStart, secondStart.Add(30*time.Minute), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if movedAgain.Revision != 2 {
+		t.Fatalf("second reschedule revision = %d, want 2", movedAgain.Revision)
+	}
+}

@@ -38,10 +38,10 @@ const (
 		"https://www.googleapis.com/auth/calendar.freebusy " +
 		"https://www.googleapis.com/auth/calendar.events"
 
-	// eventIDPrefix makes inserted event IDs deterministic per booking, which
-	// is what makes insert idempotent — see InsertEvent. Google requires event
-	// IDs to be base32hex (0-9, a-v), so the prefix is constrained to that
-	// alphabet.
+	// eventIDPrefix makes event IDs deterministic per booking, which is what
+	// lets UpsertEvent find a booking's existing event without storing a
+	// mapping first. Google requires event IDs to be base32hex (0-9, a-v), so
+	// the prefix is constrained to that alphabet.
 	eventIDPrefix = "ses"
 )
 
@@ -314,7 +314,7 @@ func (c *Client) FreeBusy(ctx context.Context, accessToken, calendarID string, f
 // Event is the subset of a Google Calendar event Sessionly writes.
 type Event struct {
 	// BookingID makes the remote event ID deterministic, which is what makes
-	// InsertEvent safe to retry.
+	// UpsertEvent safe to retry and able to move an event it already wrote.
 	BookingID   string
 	Summary     string
 	Description string
@@ -337,7 +337,11 @@ type gcalAttendee struct {
 }
 
 type gcalEvent struct {
-	ID          string         `json:"id,omitempty"`
+	ID string `json:"id,omitempty"`
+	// Status is sent explicitly so an update revives an event a previous
+	// delete cancelled. Google keeps cancelled events (and their IDs) around;
+	// PUT is the only way back.
+	Status      string         `json:"status,omitempty"`
 	Summary     string         `json:"summary"`
 	Description string         `json:"description,omitempty"`
 	Location    string         `json:"location,omitempty"`
@@ -355,47 +359,38 @@ func EventID(bookingID string) string {
 	return eventIDPrefix + strings.ToLower(strings.ReplaceAll(bookingID, "-", ""))
 }
 
-// InsertEvent writes the booking into the host's calendar and returns the
+// UpsertEvent makes the booking's event in the host's calendar match ev,
+// creating it when absent and moving it when it is already there. Returns the
 // remote event ID.
 //
-// Idempotent by construction: the event ID is derived from the booking ID, so
-// a retry after a lost response hits Google's duplicate check (409) instead of
-// creating a second event. We treat that 409 as success, because the only way
-// to get it is that our own earlier attempt landed.
+// The ID is derived from the booking ID, so an insert is safe to retry: a lost
+// response replays as a 409 duplicate. A 409 tells us an event with that ID
+// exists, not that it holds the right times, so we follow it with an update
+// instead of assuming the earlier write is still correct. That update is also
+// what makes rescheduling work: Google will not let insert reuse the ID of an
+// event a delete cancelled, so the event has to be moved, never
+// deleted-and-recreated.
 //
 // sendUpdates=none because Sessionly already emails both parties. Letting
 // Google send its own invitation would mean two mails per booking saying the
 // same thing.
-func (c *Client) InsertEvent(ctx context.Context, accessToken, calendarID string, ev Event) (string, error) {
+func (c *Client) UpsertEvent(ctx context.Context, accessToken, calendarID string, ev Event) (string, error) {
 	if calendarID == "" {
 		calendarID = "primary"
 	}
-	tz := ev.TimeZone
-	if tz == "" {
-		tz = "UTC"
-	}
-	payload := gcalEvent{
-		ID:          EventID(ev.BookingID),
-		Summary:     ev.Summary,
-		Description: ev.Description,
-		Location:    ev.Location,
-		Start:       gcalEventTime{DateTime: ev.Start.UTC().Format(time.RFC3339), TimeZone: tz},
-		End:         gcalEventTime{DateTime: ev.End.UTC().Format(time.RFC3339), TimeZone: tz},
-	}
-	if ev.GuestEmail != "" {
-		payload.Attendees = []gcalAttendee{{Email: ev.GuestEmail, DisplayName: ev.GuestName}}
-	}
+	payload := eventPayload(ev)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
-	path := "/calendars/" + url.PathEscape(calendarID) + "/events?sendUpdates=none"
 	eventID := payload.ID
+	insertPath := "/calendars/" + url.PathEscape(calendarID) + "/events?sendUpdates=none"
+	var exists bool
 	err = c.retry(ctx, func(attemptCtx context.Context) error {
-		_, err := c.doAPI(attemptCtx, "events.insert", http.MethodPost, path, accessToken, body)
+		_, err := c.doAPI(attemptCtx, "events.insert", http.MethodPost, insertPath, accessToken, body)
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict {
-			// Our own prior attempt succeeded. Nothing left to do.
+			exists = true
 			return nil
 		}
 		return err
@@ -403,7 +398,39 @@ func (c *Client) InsertEvent(ctx context.Context, accessToken, calendarID string
 	if err != nil {
 		return "", err
 	}
+	if !exists {
+		return eventID, nil
+	}
+	updatePath := "/calendars/" + url.PathEscape(calendarID) + "/events/" +
+		url.PathEscape(eventID) + "?sendUpdates=none"
+	err = c.retry(ctx, func(attemptCtx context.Context) error {
+		_, err := c.doAPI(attemptCtx, "events.update", http.MethodPut, updatePath, accessToken, body)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
 	return eventID, nil
+}
+
+func eventPayload(ev Event) gcalEvent {
+	tz := ev.TimeZone
+	if tz == "" {
+		tz = "UTC"
+	}
+	out := gcalEvent{
+		ID:          EventID(ev.BookingID),
+		Status:      "confirmed",
+		Summary:     ev.Summary,
+		Description: ev.Description,
+		Location:    ev.Location,
+		Start:       gcalEventTime{DateTime: ev.Start.UTC().Format(time.RFC3339), TimeZone: tz},
+		End:         gcalEventTime{DateTime: ev.End.UTC().Format(time.RFC3339), TimeZone: tz},
+	}
+	if ev.GuestEmail != "" {
+		out.Attendees = []gcalAttendee{{Email: ev.GuestEmail, DisplayName: ev.GuestName}}
+	}
+	return out
 }
 
 // DeleteEvent removes a mirrored event. 404 and 410 count as success: the

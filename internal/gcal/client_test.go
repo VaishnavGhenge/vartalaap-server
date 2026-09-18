@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -221,7 +222,7 @@ func TestEventIDIsDeterministicAndValid(t *testing.T) {
 	}
 }
 
-func TestInsertEventSendsDeterministicIDAndNoGoogleInvites(t *testing.T) {
+func TestUpsertEventSendsDeterministicIDAndNoGoogleInvites(t *testing.T) {
 	var body map[string]any
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("sendUpdates"); got != "none" {
@@ -231,7 +232,7 @@ func TestInsertEventSendsDeterministicIDAndNoGoogleInvites(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"id":"whatever"}`))
 	}))
-	id, err := c.InsertEvent(context.Background(), "at", "primary", Event{
+	id, err := c.UpsertEvent(context.Background(), "at", "primary", Event{
 		BookingID: "abc-123", Summary: "Intro call", Start: time.Now(), End: time.Now().Add(time.Hour),
 		GuestEmail: "guest@example.com", GuestName: "Guest",
 	})
@@ -246,22 +247,31 @@ func TestInsertEventSendsDeterministicIDAndNoGoogleInvites(t *testing.T) {
 	}
 }
 
-// The whole point of the deterministic event ID: a retry after a lost response
-// hits Google's duplicate check instead of creating a second event on the
-// host's calendar.
-func TestInsertEventTreats409AsSuccess(t *testing.T) {
+func TestUpsertEventMovesExistingDeterministicEvent(t *testing.T) {
+	var methods []string
 	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"error":{"message":"The requested identifier already exists."}}`))
+		methods = append(methods, r.Method)
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"message":"The requested identifier already exists."}}`))
+			return
+		}
+		if r.Method != http.MethodPut || !strings.Contains(r.URL.Path, EventID("abc-123")) {
+			t.Fatalf("unexpected upsert request: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
 	}))
-	id, err := c.InsertEvent(context.Background(), "at", "primary", Event{
+	id, err := c.UpsertEvent(context.Background(), "at", "primary", Event{
 		BookingID: "abc-123", Start: time.Now(), End: time.Now().Add(time.Hour),
 	})
 	if err != nil {
-		t.Fatalf("409 should be success, got %v", err)
+		t.Fatalf("existing event should be moved, got %v", err)
 	}
 	if id != EventID("abc-123") {
 		t.Fatalf("id = %q", id)
+	}
+	if !reflect.DeepEqual(methods, []string{http.MethodPost, http.MethodPut}) {
+		t.Fatalf("methods = %v, want POST then PUT", methods)
 	}
 }
 

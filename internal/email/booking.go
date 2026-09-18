@@ -24,6 +24,7 @@ type BookingInput struct {
 	StartsAt           time.Time
 	EndsAt             time.Time
 	MeetCode           string
+	Sequence           int
 	CancellationReason string
 	// CancelToken is the magic-link credential included on the booking-page
 	// URL the guest receives. Optional in case the caller doesn't have one
@@ -40,6 +41,10 @@ type BookingInput struct {
 // after booking. Body is intentionally short — most guests scan it for the
 // time + meet link and close it.
 func RenderBookingConfirmation(in BookingInput, from string) Message {
+	return renderGuestBooking(in, from, bookingBooked)
+}
+
+func renderGuestBooking(in BookingInput, from string, tone bookingTone) Message {
 	roomURL := joinURL(in.PublicAppURL, "/room/"+in.MeetCode)
 	if in.CancelToken != "" {
 		roomURL += "?gt=" + in.CancelToken
@@ -53,13 +58,13 @@ func RenderBookingConfirmation(in BookingInput, from string) Message {
 	when := formatWhen(in.StartsAt, in.EndsAt, in.HostTimezone)
 
 	text := strings.Join([]string{
-		fmt.Sprintf("You're booked with %s.", in.HostName),
+		fmt.Sprintf("%s %s.", tone.guestLede, in.HostName),
 		"",
 		fmt.Sprintf("Event: %s (%d min)", in.EventTitle, in.EventMinutes),
 		fmt.Sprintf("When:  %s", when),
 		fmt.Sprintf("Where: %s", roomURL),
 		"",
-		fmt.Sprintf("Manage or cancel: %s", confirmURL),
+		fmt.Sprintf("Manage booking: %s", confirmURL),
 		fmt.Sprintf("Meet code: %s", in.MeetCode),
 		"",
 		"The room opens at the booked time. Bookmark this email — the meet link",
@@ -67,6 +72,8 @@ func RenderBookingConfirmation(in BookingInput, from string) Message {
 	}, "\n")
 
 	htmlBody := renderHTML(map[string]string{
+		"Eyebrow":    tone.eyebrow,
+		"Lede":       tone.guestLede,
 		"GuestName":  html.EscapeString(in.GuestName),
 		"HostName":   html.EscapeString(in.HostName),
 		"EventTitle": html.EscapeString(in.EventTitle),
@@ -80,7 +87,7 @@ func RenderBookingConfirmation(in BookingInput, from string) Message {
 	return Message{
 		To:       []string{addressLine(in.GuestName, in.GuestEmail)},
 		From:     from,
-		Subject:  fmt.Sprintf("Booked: %s with %s", in.EventTitle, in.HostName),
+		Subject:  fmt.Sprintf("%s: %s with %s", tone.guestSubject, in.EventTitle, in.HostName),
 		TextBody: text,
 		HTMLBody: htmlBody,
 		Attachments: []Attachment{{
@@ -96,10 +103,14 @@ func RenderBookingConfirmation(in BookingInput, from string) Message {
 // it. Same .ics attachment so the host can add it to their calendar with one
 // click.
 func RenderBookingNotification(in BookingInput, from string) Message {
+	return renderHostBooking(in, from, bookingBooked)
+}
+
+func renderHostBooking(in BookingInput, from string, tone bookingTone) Message {
 	roomURL := joinURL(in.PublicAppURL, "/room/"+in.MeetCode)
 	when := formatWhen(in.StartsAt, in.EndsAt, in.HostTimezone)
 	text := strings.Join([]string{
-		fmt.Sprintf("New booking from %s.", in.GuestName),
+		fmt.Sprintf("%s %s.", tone.hostLede, in.GuestName),
 		"",
 		fmt.Sprintf("Guest: %s <%s>", in.GuestName, in.GuestEmail),
 		fmt.Sprintf("Event: %s (%d min)", in.EventTitle, in.EventMinutes),
@@ -107,6 +118,7 @@ func RenderBookingNotification(in BookingInput, from string) Message {
 		fmt.Sprintf("Room:  %s", roomURL),
 	}, "\n")
 	htmlBody := renderHTML(map[string]string{
+		"Eyebrow":    tone.eyebrow,
 		"GuestName":  html.EscapeString(in.GuestName),
 		"GuestEmail": html.EscapeString(in.GuestEmail),
 		"EventTitle": html.EscapeString(in.EventTitle),
@@ -117,7 +129,7 @@ func RenderBookingNotification(in BookingInput, from string) Message {
 	return Message{
 		To:       []string{addressLine(in.HostName, in.HostEmail)},
 		From:     from,
-		Subject:  fmt.Sprintf("New booking: %s with %s", in.EventTitle, in.GuestName),
+		Subject:  fmt.Sprintf("%s: %s with %s", tone.hostSubject, in.EventTitle, in.GuestName),
 		TextBody: text,
 		HTMLBody: htmlBody,
 		Attachments: []Attachment{{
@@ -127,6 +139,127 @@ func RenderBookingNotification(in BookingInput, from string) Message {
 		}},
 	}
 }
+
+// bookingTone is the wording that separates a first confirmation from a
+// reschedule. Everything else about the two emails is identical, so they share
+// one template and one renderer rather than being patched apart afterwards.
+type bookingTone struct {
+	eyebrow      string // small-caps label above the heading
+	guestLede    string // opening line, completed by the host's name
+	hostLede     string // opening line, completed by the guest's name
+	guestSubject string
+	hostSubject  string
+}
+
+var (
+	bookingBooked = bookingTone{
+		eyebrow:      "Confirmed",
+		guestLede:    "You're booked with",
+		hostLede:     "New booking from",
+		guestSubject: "Booked",
+		hostSubject:  "New booking",
+	}
+	bookingMoved = bookingTone{
+		eyebrow:      "Rescheduled",
+		guestLede:    "Your booking has been rescheduled with",
+		hostLede:     "Booking rescheduled by",
+		guestSubject: "Rescheduled",
+		hostSubject:  "Rescheduled",
+	}
+)
+
+// RenderBookingRescheduled keeps the familiar confirmation layout while making
+// the changed state unmistakable. The same stable meeting and manage links are
+// included so neither participant has to hunt through an older email.
+func RenderBookingRescheduled(in BookingInput, from string, forHost bool) Message {
+	if forHost {
+		return renderHostBooking(in, from, bookingMoved)
+	}
+	return renderGuestBooking(in, from, bookingMoved)
+}
+
+func RenderBookingReminder(in BookingInput, from string, forHost bool, lead time.Duration) Message {
+	roomURL := joinURL(in.PublicAppURL, "/room/"+in.MeetCode)
+	if !forHost && in.CancelToken != "" {
+		roomURL += "?gt=" + in.CancelToken
+	}
+	manageURL := joinURL(in.PublicAppURL, "/m/"+in.MeetCode)
+	if !forHost && in.CancelToken != "" {
+		manageURL += "?t=" + in.CancelToken
+	}
+	leadLabel := "1 hour"
+	if lead >= 24*time.Hour {
+		leadLabel = "24 hours"
+	}
+	when := formatWhen(in.StartsAt, in.EndsAt, in.HostTimezone)
+	withName := in.HostName
+	recipientName := in.GuestName
+	recipientEmail := in.GuestEmail
+	if forHost {
+		withName = in.GuestName
+		recipientName = in.HostName
+		recipientEmail = in.HostEmail
+	}
+	textLines := []string{
+		fmt.Sprintf("Your %s starts in %s.", in.EventTitle, leadLabel),
+		"",
+		fmt.Sprintf("With:  %s", withName),
+		fmt.Sprintf("When:  %s", when),
+		fmt.Sprintf("Join:  %s", roomURL),
+	}
+	if !forHost {
+		textLines = append(textLines, fmt.Sprintf("Manage booking: %s", manageURL))
+	}
+	manageRow := ""
+	if !forHost {
+		manageRow = fmt.Sprintf(`<p style="margin:12px 0 0;font-size:13px"><a href="%s" style="color:#6b7280">Manage booking</a></p>`, html.EscapeString(manageURL))
+	}
+	htmlBody := renderHTML(map[string]string{
+		"EventTitle": html.EscapeString(in.EventTitle),
+		"Lead":       html.EscapeString(leadLabel),
+		"WithName":   html.EscapeString(withName),
+		"When":       html.EscapeString(when),
+		"RoomURL":    html.EscapeString(roomURL),
+		"ManageRow":  manageRow,
+	}, reminderHTML)
+	return Message{
+		To:       []string{addressLine(recipientName, recipientEmail)},
+		From:     from,
+		Subject:  fmt.Sprintf("Reminder: %s in %s", in.EventTitle, leadLabel),
+		TextBody: strings.Join(textLines, "\n"),
+		HTMLBody: htmlBody,
+	}
+}
+
+var reminderHTML = emailWrap(`
+<tr>
+  <td style="padding:20px 32px 8px">
+    <p style="margin:0 0 6px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#4f46e5">Starting in {{.Lead}}</p>
+    <h2 style="margin:0 0 6px;font-size:22px;font-weight:700;color:#111827;line-height:1.3">{{.EventTitle}}</h2>
+    <p style="margin:0;font-size:14px;color:#6b7280">With {{.WithName}}</p>
+  </td>
+</tr>
+<tr>
+  <td style="padding:16px 32px 20px">
+    <table cellpadding="0" cellspacing="0" width="100%" style="background:#f9fafb;border-radius:10px;border:1px solid #e5e7eb">
+      <tr><td style="padding:16px 20px">
+        <span style="font-size:11px;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:0.06em">WHEN</span><br>
+        <span style="font-size:14px;color:#111827">{{.When}}</span>
+      </td></tr>
+    </table>
+  </td>
+</tr>
+<tr>
+  <td style="padding:0 32px 24px;text-align:center">
+    <table cellpadding="0" cellspacing="0" style="margin:0 auto">
+      <tr><td style="background:#4f46e5;border-radius:8px;padding:13px 28px">
+        <a href="{{.RoomURL}}" style="color:#ffffff;font-size:15px;font-weight:600;text-decoration:none">Join meeting &#8594;</a>
+      </td></tr>
+    </table>
+    {{.ManageRow}}
+  </td>
+</tr>
+`)
 
 // RenderBookingCancellation is sent to both parties when a booking is
 // cancelled. `cancelledBy` is "host" or "guest" so the message frames it from
@@ -264,6 +397,7 @@ func BuildICS(in BookingInput, location string) []byte {
 	w("METHOD:PUBLISH")
 	w("BEGIN:VEVENT")
 	w("UID:" + in.MeetCode + "@sessionly")
+	w(fmt.Sprintf("SEQUENCE:%d", in.Sequence))
 	stamp := in.CreatedAt
 	if stamp.IsZero() {
 		stamp = time.Now()
@@ -340,8 +474,8 @@ func renderHTML(vars map[string]string, template string) string {
 var guestHTML = emailWrap(`
 <tr>
   <td style="padding:20px 32px 8px">
-    <p style="margin:0 0 6px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#4f46e5">Confirmed</p>
-    <h2 style="margin:0 0 6px;font-size:22px;font-weight:700;color:#111827;line-height:1.3">You're booked with {{.HostName}}</h2>
+    <p style="margin:0 0 6px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#4f46e5">{{.Eyebrow}}</p>
+    <h2 style="margin:0 0 6px;font-size:22px;font-weight:700;color:#111827;line-height:1.3">{{.Lede}} {{.HostName}}</h2>
     <p style="margin:0;font-size:14px;color:#6b7280">{{.EventTitle}} &middot; {{.Duration}}</p>
   </td>
 </tr>
@@ -371,7 +505,7 @@ var guestHTML = emailWrap(`
       </td></tr>
     </table>
     <p style="margin:14px 0 0;font-size:12px;color:#9ca3af">
-      The room opens at the booked time. Need to <a href="{{.ConfirmURL}}" style="color:#6b7280;text-decoration:underline">manage or cancel</a>?
+      The room opens at the booked time. Need to <a href="{{.ConfirmURL}}" style="color:#6b7280;text-decoration:underline">manage your booking</a>?
     </p>
   </td>
 </tr>
@@ -380,7 +514,7 @@ var guestHTML = emailWrap(`
 var hostHTML = emailWrap(`
 <tr>
   <td style="padding:20px 32px 8px">
-    <p style="margin:0 0 6px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#4f46e5">New booking</p>
+    <p style="margin:0 0 6px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#4f46e5">{{.Eyebrow}}</p>
     <h2 style="margin:0 0 6px;font-size:22px;font-weight:700;color:#111827;line-height:1.3">{{.EventTitle}}</h2>
     <p style="margin:0;font-size:14px;color:#6b7280">{{.Duration}} with {{.GuestName}}</p>
   </td>

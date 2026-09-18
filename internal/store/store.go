@@ -49,6 +49,7 @@ type Storer interface {
 	ListBookingsForHost(ctx context.Context, hostID string, fromUTC time.Time, limit int) ([]Booking, error)
 	ListBookingsForEventInRange(ctx context.Context, eventTypeID string, fromUTC, toUTC time.Time) ([]Booking, error)
 	ListBookingsForHostInRange(ctx context.Context, hostID string, fromUTC, toUTC time.Time) ([]Booking, error)
+	RescheduleBooking(ctx context.Context, id string, startsAt, endsAt time.Time, holdToken string) (*Booking, error)
 	CancelBooking(ctx context.Context, id, reason, cancelledBy string) error
 	CountBookingsInMonth(ctx context.Context, hostID string, year int, month time.Month) (int, error)
 
@@ -127,6 +128,7 @@ type Booking struct {
 	EndsAt             time.Time
 	MeetCode           string
 	Status             string // "pending_payment" | "confirmed" | "cancelled" | "completed"
+	Revision           int
 	StripeSessionID    *string
 	CancellationReason *string
 	CancelledBy        *string
@@ -665,7 +667,7 @@ func (s *Store) CountActiveEventTypes(ctx context.Context, hostID string) (int, 
 // ─── Bookings ────────────────────────────────────────────────────────────────
 
 const bookingCols = `id, event_type_id, host_id, guest_email, guest_name,
-		starts_at, ends_at, meet_code, status, stripe_session_id,
+		starts_at, ends_at, meet_code, status, revision, stripe_session_id,
 		cancel_token, cancellation_reason, cancelled_by, created_at`
 
 func scanBooking(row pgx.Row, b *Booking) error {
@@ -673,7 +675,7 @@ func scanBooking(row pgx.Row, b *Booking) error {
 		&b.ID, &b.EventTypeID, &b.HostID,
 		&b.GuestEmail, &b.GuestName,
 		&b.StartsAt, &b.EndsAt,
-		&b.MeetCode, &b.Status, &b.StripeSessionID,
+		&b.MeetCode, &b.Status, &b.Revision, &b.StripeSessionID,
 		&b.CancelToken, &b.CancellationReason, &b.CancelledBy, &b.CreatedAt,
 	)
 }
@@ -771,6 +773,76 @@ func (s *Store) GetBookingByMeetCode(ctx context.Context, meetCode string) (*Boo
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("store: get booking by meet code: %w", err)
+	}
+	return out, nil
+}
+
+// RescheduleBooking moves an active booking while preserving its identity,
+// meeting code, and guest authority token. The host lock serialises this with
+// CreateBooking so the availability decision and update are one transaction.
+func (s *Store) RescheduleBooking(ctx context.Context, id string, startsAt, endsAt time.Time, holdToken string) (*Booking, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, fmt.Errorf("store: begin reschedule: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var hostID string
+	if err := tx.QueryRow(ctx, `SELECT host_id FROM bookings WHERE id=$1`, id).Scan(&hostID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("store: find reschedule booking: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, hostID); err != nil {
+		return nil, fmt.Errorf("store: lock reschedule host: %w", err)
+	}
+
+	var current Booking
+	if err := scanBooking(tx.QueryRow(ctx, `SELECT `+bookingCols+` FROM bookings WHERE id=$1 FOR UPDATE`, id), &current); err != nil {
+		return nil, fmt.Errorf("store: lock reschedule booking: %w", err)
+	}
+	if current.Status != "confirmed" {
+		return nil, ErrConflict
+	}
+
+	var occupied bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM bookings b JOIN event_types old ON old.id=b.event_type_id
+		JOIN event_types wanted ON wanted.id=$2
+		WHERE b.host_id=$1 AND b.id<>$5 AND b.status <> 'cancelled'
+		AND b.starts_at - old.buffer_before_min * interval '1 minute' < $4::timestamptz + wanted.buffer_min * interval '1 minute'
+		AND b.ends_at + old.buffer_min * interval '1 minute' > $3::timestamptz - wanted.buffer_before_min * interval '1 minute'
+	)`, current.HostID, current.EventTypeID, startsAt, endsAt, current.ID).Scan(&occupied)
+	if err != nil {
+		return nil, fmt.Errorf("store: check reschedule overlap: %w", err)
+	}
+	if occupied {
+		return nil, ErrSlotTaken
+	}
+
+	out := &Booking{}
+	err = scanBooking(tx.QueryRow(ctx, `UPDATE bookings
+		SET starts_at=$2, ends_at=$3, revision=revision+1,
+			cancellation_reason=NULL, cancelled_by=NULL
+		WHERE id=$1 AND status='confirmed' RETURNING `+bookingCols,
+		current.ID, startsAt.UTC(), endsAt.UTC()), out)
+	if err != nil {
+		return nil, fmt.Errorf("store: reschedule booking: %w", err)
+	}
+	action := fmt.Sprintf("rescheduled:%d", out.Revision)
+	if err := enqueueBookingNotifications(ctx, tx, *out, action); err != nil {
+		return nil, fmt.Errorf("store: enqueue reschedule: %w", err)
+	}
+	if holdToken != "" {
+		if _, err := tx.Exec(ctx, `DELETE FROM slot_holds WHERE hold_token=$1`, holdToken); err != nil {
+			return nil, fmt.Errorf("store: consume reschedule hold: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("store: commit reschedule: %w", err)
 	}
 	return out, nil
 }

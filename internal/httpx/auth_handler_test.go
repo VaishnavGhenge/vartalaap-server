@@ -488,6 +488,34 @@ func (m *memStore) CancelBooking(_ context.Context, id, reason, cancelledBy stri
 	return nil
 }
 
+func (m *memStore) RescheduleBooking(_ context.Context, id string, startsAt, endsAt time.Time, holdToken string) (*store.Booking, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.bookings[id]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	if b.Status != "confirmed" {
+		return nil, store.ErrConflict
+	}
+	for _, existing := range m.bookings {
+		if existing.ID != id && existing.HostID == b.HostID && existing.Status != "cancelled" &&
+			existing.StartsAt.Before(endsAt) && existing.EndsAt.After(startsAt) {
+			return nil, store.ErrSlotTaken
+		}
+	}
+	b.StartsAt = startsAt.UTC()
+	b.EndsAt = endsAt.UTC()
+	b.Revision++
+	b.CancellationReason = nil
+	b.CancelledBy = nil
+	if holdToken != "" {
+		delete(m.holds, holdToken)
+	}
+	out := *b
+	return &out, nil
+}
+
 func (m *memStore) CountBookingsInMonth(_ context.Context, hostID string, year int, month time.Month) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

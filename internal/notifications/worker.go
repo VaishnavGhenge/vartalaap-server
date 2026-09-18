@@ -108,6 +108,14 @@ func (w *Worker) deliver(ctx context.Context, job store.OutboxJob) error {
 		return err
 	}
 	b := job.Payload.Booking
+	if _, reminder := reminderLead(job.Action); reminder {
+		// The payload is a snapshot of the time this reminder was scheduled
+		// for. A cancellation or reschedule makes that snapshot stale; finish
+		// it silently even if it was already claimed when the booking changed.
+		if current.Status != "confirmed" || !current.StartsAt.Equal(b.StartsAt) || !time.Now().Before(current.StartsAt) {
+			return nil
+		}
+	}
 	if job.Channel == "calendar" {
 		if w.Calendar == nil {
 			_, err := w.Queue.GetCalendarConnection(ctx, b.HostID, "google")
@@ -125,14 +133,18 @@ func (w *Worker) deliver(ctx context.Context, job store.OutboxJob) error {
 		if time.Now().After(current.EndsAt) {
 			return nil
 		}
-		return w.Calendar.SyncBookingCreated(ctx, calendar.BookingEvent{
+		// Create and reschedule are the same write: SyncBooking moves an
+		// existing event rather than deleting and re-inserting it, so a
+		// reschedule needs no separate branch here.
+		return w.Calendar.SyncBooking(ctx, calendar.BookingEvent{
 			BookingID: b.ID, HostID: b.HostID, HostTimezone: job.Payload.HostTimezone,
 			EventTitle: job.Payload.EventTitle, GuestName: b.GuestName, GuestEmail: b.GuestEmail,
 			StartsAt: b.StartsAt, EndsAt: b.EndsAt, MeetCode: b.MeetCode,
 			RoomURL: strings.TrimRight(w.PublicAppURL, "/") + "/room/" + b.MeetCode,
 		})
 	}
-	if job.Action == "created" && (current.Status == "cancelled" || time.Now().After(current.EndsAt)) {
+	if (job.Action == "created" || strings.HasPrefix(job.Action, "rescheduled:")) &&
+		(current.Status == "cancelled" || time.Now().After(current.EndsAt)) {
 		return nil
 	}
 	if w.Mailer == nil {
@@ -168,10 +180,12 @@ func (w *Worker) message(job store.OutboxJob) email.Message {
 		HostName: p.HostName, HostEmail: p.HostEmail, HostTimezone: p.HostTimezone,
 		EventTitle: p.EventTitle, EventMinutes: p.EventMinutes,
 		StartsAt: b.StartsAt, EndsAt: b.EndsAt, MeetCode: b.MeetCode,
-		CancelToken: b.CancelToken, PublicAppURL: w.PublicAppURL,
+		Sequence: b.Revision, CancelToken: b.CancelToken, PublicAppURL: w.PublicAppURL,
 	}
 	var msg email.Message
-	if job.Action == "cancelled" {
+	if lead, reminder := reminderLead(job.Action); reminder {
+		msg = email.RenderBookingReminder(in, "", job.Channel == "host_email", lead)
+	} else if job.Action == "cancelled" {
 		by := ""
 		if b.CancelledBy != nil {
 			by = *b.CancelledBy
@@ -185,6 +199,8 @@ func (w *Worker) message(job store.OutboxJob) email.Message {
 			address = mail.Address{Name: p.HostName, Address: p.HostEmail}
 		}
 		msg.To = []string{address.String()}
+	} else if strings.HasPrefix(job.Action, "rescheduled:") {
+		msg = email.RenderBookingRescheduled(in, "", job.Channel == "host_email")
 	} else if job.Channel == "host_email" {
 		msg = email.RenderBookingNotification(in, "")
 	} else {
@@ -192,4 +208,14 @@ func (w *Worker) message(job store.OutboxJob) email.Message {
 	}
 	msg.IdempotencyKey = fmt.Sprintf("booking/%s/%s/%s", b.ID, job.Action, job.Channel)
 	return msg
+}
+
+func reminderLead(action string) (time.Duration, bool) {
+	if strings.HasPrefix(action, "reminder:24h:") {
+		return 24 * time.Hour, true
+	}
+	if strings.HasPrefix(action, "reminder:1h:") {
+		return time.Hour, true
+	}
+	return 0, false
 }
