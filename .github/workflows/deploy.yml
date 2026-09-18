@@ -1,0 +1,107 @@
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: backend-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RAILWAY_PROJECT_ID: adc6b001-6413-4bd3-84cf-6c6ba4bde15c
+  RAILWAY_ENVIRONMENT_ID: 3a097e84-9216-4ca6-9ab9-28344423ea89
+  RAILWAY_SERVICE_ID: d66aa4de-479d-409c-b96f-078fd3cc03b4
+
+jobs:
+  test:
+    name: Test backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+  deploy:
+    name: Deploy production backend
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Upload deployment to Railway
+        id: upload
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          set -euo pipefail
+          response="$(railway up \
+            --detach \
+            --json \
+            --message "GitHub Actions ${GITHUB_SHA}" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --service "$RAILWAY_SERVICE_ID")"
+          deployment_id="$(printf '%s' "$response" | jq -r '.deploymentId')"
+          test -n "$deployment_id" && test "$deployment_id" != "null"
+          echo "deployment_id=$deployment_id" >> "$GITHUB_OUTPUT"
+          echo "Started Railway deployment $deployment_id"
+
+      - name: Wait for Railway deployment
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          DEPLOYMENT_ID: ${{ steps.upload.outputs.deployment_id }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            deployment="$(railway deployment list \
+              --json \
+              --project "$RAILWAY_PROJECT_ID" \
+              --environment "$RAILWAY_ENVIRONMENT_ID" \
+              --service "$RAILWAY_SERVICE_ID" | \
+              jq -c --arg id "$DEPLOYMENT_ID" '.[] | select(.id == $id)')"
+            state="$(printf '%s' "$deployment" | jq -r '.status // "UNKNOWN"')"
+            echo "Attempt $attempt/60: $state"
+
+            case "$state" in
+              SUCCESS)
+                exit 0
+                ;;
+              FAILED|CRASHED|NEEDS_APPROVAL|SLEEPING|SKIPPED|REMOVED|REMOVING)
+                echo "Railway deployment $DEPLOYMENT_ID ended in $state"
+                exit 1
+                ;;
+            esac
+
+            sleep 10
+          done
+
+          echo "Timed out waiting for Railway deployment $DEPLOYMENT_ID"
+          exit 1
