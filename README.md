@@ -13,6 +13,6 @@ Register `GOOGLE_AUTH_REDIRECT_URL` as an authorized redirect URI on the Google 
 
 ## CI/CD
 
-`.github/workflows/deploy.yml` runs `go test ./...` and `go vet ./...` for every push to `main`. After those checks pass, it uploads the repository to the production `sessionly-api` Railway service and waits for that exact deployment to reach `SUCCESS`.
+`.github/workflows/deploy.yml` runs `go test ./...` and `go vet ./...` for every push to `main`. Railway is connected directly to this repository's `main` branch with **Wait for CI** enabled, so Railway starts the production `sessionly-api` deployment only after these checks pass.
 
-Configure a GitHub Actions environment named `production` and add a `RAILWAY_TOKEN` secret containing a Railway project token with deploy access to the Sessionly production project. The workflow does not read application secrets from GitHub; runtime variables remain configured in Railway.
+No Railway token is needed in GitHub Actions for this setup. Runtime application variables remain configured in Railway.
